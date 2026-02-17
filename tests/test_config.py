@@ -40,6 +40,35 @@ def test_deprecated_search_api_error(root, config_path):
         config_path.unlink()
 
 
+def test_globus_download_requires_credentials(root, config_path):
+    root.mkdir(parents=True)
+    with open(config_path, "w") as f:
+        tomlkit.dump(
+            {"globus": {"prefer_globus_download": True, "destination_collection_uuid": "abcde"}}, f
+        )
+    try:
+        with pytest.raises(ValueError, match="client_id"):
+            Config.load(root)
+    except Exception:
+        raise
+    finally:
+        config_path.unlink()
+
+
+def test_globus_download_requires_collection(root, config_path):
+    root.mkdir(parents=True)
+    with open(config_path, "w") as f:
+        tomlkit.dump(
+            {"globus": {"prefer_globus_download": True, "client_id": "dummy", "client_secret": "dummy"}}, f
+        )
+    try:
+        with pytest.raises(ValueError, match="destination_collection_uuid"):
+            Config.load(root)
+    except Exception:
+        raise
+    finally:
+        config_path.unlink()
+
 def test_update_config(root, config_path):
     root.mkdir(parents=True)
     with open(config_path, "w") as f:

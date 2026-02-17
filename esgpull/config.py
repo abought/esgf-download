@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import tomlkit
-from pydantic import BaseModel, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -105,6 +105,34 @@ class DefaultOptions(BaseModel, validate_assignment=True):
             replica=self.replica,
             retracted=self.retracted,
         )
+
+
+class Globus(BaseModel, validate_assignment=True):
+    """
+    Options for using the Globus transfer feature
+    """
+
+    # Not every ESGF item will support a globus download source, but use globus transfers whenever possible.
+    prefer_globus_download: bool = False
+
+    # At present, this only allows service client credentials, which are a separate identity authorized to access a
+    #  storage collection. User credentials are not yet supported.
+    client_id: str = ""
+    client_secret: str = ""
+
+    # Each workspace allows exactly one destination collection and root folder
+    destination_collection_uuid: str = ""
+    destination_collection_root: str = ""
+
+    @model_validator(mode="after")
+    def has_globus_options(self):
+        if self.prefer_globus_download and not (self.client_id and self.client_secret):
+            raise ValueError("If using Globus download, must provide a valid Globus `client_id` and `client_secret`")
+
+        if self.prefer_globus_download and not self.destination_collection_uuid:
+            raise ValueError("If using Globus download, must specify `destination_collection_uuid`")
+
+        return self
 
 
 class API(BaseModel, validate_assignment=True):
@@ -267,6 +295,8 @@ class Config(BaseSettings):
     cli: Cli = Field(default_factory=Cli)
     db: Db = Field(default_factory=Db)
     download: Download = Field(default_factory=Download)
+    globus: Globus = Field(default_factory=Globus)
+
     api: API = Field(default_factory=API)
     plugins: Plugins = Field(default_factory=Plugins)
     _raw: dict[str, Any] | None = PrivateAttr(default=None)
