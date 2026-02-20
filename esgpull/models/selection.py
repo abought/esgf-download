@@ -31,6 +31,9 @@ def opposite(facet_name: str) -> str:
 
 
 class Selection(Base):
+    """
+    A group of facet name/value pairs that control what a query should retrieve
+    """
     __tablename__ = "selection"
     _facet_names: ClassVar[set[str]] = set()
 

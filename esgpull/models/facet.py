@@ -5,6 +5,7 @@ from esgpull.models.base import Base
 
 
 class Facet(Base):
+    """A facet represents one search term/value filter pair. A query may contain more than one facet."""
     __tablename__ = "facet"
 
     name: Mapped[str] = mapped_column(sa.String(64))

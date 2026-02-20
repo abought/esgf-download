@@ -46,6 +46,9 @@ class Option(Enum):
 
 
 class Options(Base):
+    """
+    A set of options that modify what files are retrieved. These are known system flags rather than arbitrary facets.
+    """
     __tablename__ = "options"
 
     distrib: Mapped[Option] = mapped_column(sa.Enum(Option))

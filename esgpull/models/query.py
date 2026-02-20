@@ -59,6 +59,11 @@ query_tag_proxy = sa.Table(
 
 
 class File(Base):
+    """
+    Represents a single downloadable file from the search catalog, along with its current download status.
+
+    Replicas may generate more than one file entry, but they will be de-duplicated during the download step
+    """
     __tablename__ = "file"
     __table_args__ = (
         sa.Index("ix_file_dataset_status", "dataset_id", "status"),
@@ -185,6 +190,9 @@ class QueryDict(TypedDict):
 
 
 class Query(Base):
+    """
+    Represents a single query (selected facet filters + options)
+    """
     __tablename__ = "query"
 
     tags: Mapped[list[Tag]] = relationship(

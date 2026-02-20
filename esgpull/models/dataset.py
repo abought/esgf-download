@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 
 @dataclass
 class DatasetRecord:
+    """
+    A result container for search API queries. May contain more information than is stored in the database
+    """
     dataset_id: str
     master_id: str
     version: str
@@ -45,6 +48,7 @@ class DatasetRecord:
 
 
 class Dataset(BaseNoSHA):
+    """A database representation of a dataset, which may contain multiple files."""
     __tablename__ = "dataset"
 
     dataset_id: Mapped[str] = mapped_column(sa.String(255), primary_key=True)
