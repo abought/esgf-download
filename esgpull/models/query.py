@@ -17,6 +17,8 @@ from esgpull.exceptions import UntrackableQuery
 from esgpull.models.base import Base, Sha
 from esgpull.models.dataset import Dataset
 from esgpull.models.file import FileDict, FileStatus
+from esgpull.models.globus_storage import GlobusStorage
+from esgpull.models.globus_transfer import GlobusTransfer
 from esgpull.models.options import Options
 from esgpull.models.selection import FacetValues, Selection
 from esgpull.models.tag import Tag
@@ -85,6 +87,33 @@ class File(Base):
     status: Mapped[FileStatus] = mapped_column(
         sa.Enum(FileStatus), default=FileStatus.New
     )
+
+    globus_storage_sha: Mapped[str | None] = mapped_column(
+        Sha,
+        sa.ForeignKey("globus_storage.sha"),
+        init=False,
+        default=None,
+    )
+    globus_storage: Mapped[GlobusStorage | None] = relationship(
+        init=False,
+        default=None,
+        repr=False,
+        lazy="joined",
+    )
+
+    globus_transfer_task_id: Mapped[str | None] = mapped_column(
+        sa.String(36),
+        sa.ForeignKey("globus_transfer.task_id"),
+        init=False,
+        default=None,
+    )
+    globus_transfer: Mapped[GlobusTransfer | None] = relationship(
+        back_populates="files",
+        init=False,
+        default=None,
+        repr=False,
+    )
+
     queries: Mapped[list[Query]] = relationship(
         secondary=query_file_proxy,
         default_factory=list,

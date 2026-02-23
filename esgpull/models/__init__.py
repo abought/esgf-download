@@ -4,6 +4,8 @@ from esgpull.models.base import Base
 from esgpull.models.dataset import Dataset, DatasetRecord
 from esgpull.models.facet import Facet
 from esgpull.models.file import FastFile, FileStatus
+from esgpull.models.globus_storage import GlobusStorage
+from esgpull.models.globus_transfer import GlobusTransfer, GlobusTransferStatus
 from esgpull.models.options import Option, Options
 from esgpull.models.query import File, LegacyQuery, Query, QueryDict
 from esgpull.models.selection import Selection
@@ -20,6 +22,9 @@ __all__ = [
     "FastFile",
     "File",
     "FileStatus",
+    "GlobusStorage",
+    "GlobusTransfer",
+    "GlobusTransferStatus",
     "LegacyQuery",
     "Option",
     "Options",
