@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from esgpull.config import Config
-from esgpull.fs import FileCheck, Filesystem
+from esgpull.downloader.fs import FileCheck, Filesystem
 from esgpull.models import File
 
 

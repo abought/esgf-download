@@ -8,9 +8,9 @@ from aiostream.stream import merge
 from httpx import AsyncClient, HTTPError
 
 from esgpull.config import Config
-from esgpull.download import DownloadCtx, Simple
+from esgpull.downloader.as_https import DownloadCtx, Simple
 from esgpull.exceptions import DownloadSizeError
-from esgpull.fs import Digest, Filesystem
+from esgpull.downloader.fs import Digest, Filesystem
 from esgpull.models import File
 from esgpull.result import Err, Ok, Result
 from esgpull.tui import logger

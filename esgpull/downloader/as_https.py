@@ -5,7 +5,7 @@ from datetime import datetime
 
 from httpx import AsyncClient
 
-from esgpull.fs import Digest
+from esgpull.downloader.fs import Digest
 from esgpull.models import File
 
 # import asyncio

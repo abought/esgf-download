@@ -4,9 +4,9 @@ import json
 import httpx
 import pytest
 
-from esgpull.fs import FileCheck, Filesystem
+from esgpull.downloader.fs import FileCheck, Filesystem
 from esgpull.models import File
-from esgpull.processor import Task
+from esgpull.downloader.pipeline import Task
 from esgpull.result import Ok
 
 FILE_JSON: dict = json.loads("""

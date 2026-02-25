@@ -25,14 +25,14 @@ from rich.progress import (
 from esgpull.config import Config
 from esgpull.context import Context
 from esgpull.database import Database
-from esgpull.download import DownloadCtx
+from esgpull.downloader.as_https import DownloadCtx
 from esgpull.exceptions import (
     DownloadCancelled,
     InvalidInstallPath,
     NoInstallPath,
     UnknownDefaultQueryID,
 )
-from esgpull.fs import Filesystem
+from esgpull.downloader.fs import Filesystem
 from esgpull.graph import Graph
 from esgpull.install_config import InstallConfig
 from esgpull.models import (
@@ -52,7 +52,7 @@ from esgpull.plugin import (
     get_plugin_manager,
     set_plugin_manager,
 )
-from esgpull.processor import Processor
+from esgpull.downloader.pipeline import Processor
 from esgpull.result import Err, Ok, Result
 from esgpull.tui import UI, DummyLive, ErrorCountColumn, Verbosity, logger
 from esgpull.utils import format_size
