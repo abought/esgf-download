@@ -69,9 +69,10 @@ class File(Base):
     __tablename__ = "file"
     __table_args__ = (
         sa.Index("ix_file_dataset_status", "dataset_id", "status"),
+        sa.UniqueConstraint("file_id", name="uq_file_file_id"),
     )
 
-    file_id: Mapped[str] = mapped_column(sa.String(255), unique=True)
+    file_id: Mapped[str] = mapped_column(sa.String(255))
     dataset_id: Mapped[str] = mapped_column(
         sa.String(255), sa.ForeignKey("dataset.dataset_id")
     )

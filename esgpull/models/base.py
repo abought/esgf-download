@@ -18,6 +18,15 @@ Sha = sa.String(40)
 
 # Base class for all models - provides core SQLAlchemy functionality
 class _BaseModel(MappedAsDataclass, DeclarativeBase):
+    metadata = sa.MetaData(
+        naming_convention={
+            "ix": "ix_%(column_0_label)s",
+            "uq": "uq_%(table_name)s_%(column_0_name)s",
+            "ck": "ck_%(table_name)s_%(constraint_name)s",
+            "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+            "pk": "pk_%(table_name)s",
+        }
+    )
     __dataclass_fields__: ClassVar[dict[str, Field]]
     __sql_attrs__ = ("id", "_sa_instance_state", "__dataclass_fields__")  # type: ignore
 

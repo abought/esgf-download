@@ -13,7 +13,7 @@ class GlobusStorage(Base):
     """
     __tablename__ = "globus_storage"
     __table_args__ = (
-        sa.UniqueConstraint("origin_id", "origin_path"),
+        sa.UniqueConstraint("origin_id", "origin_path", name="uq_globus_storage_origin_path"),
     )
 
     origin_id: Mapped[str] = mapped_column(sa.String(36))
