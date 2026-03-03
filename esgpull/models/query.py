@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, MutableMapping, Sequence
 from datetime import datetime, timezone
+import posixpath
 from typing import TYPE_CHECKING, Any, Literal
 
 import sqlalchemy as sa
@@ -200,6 +201,12 @@ class File(Base):
             size=self.size,
             status=self.status.name,
         )
+
+    @property
+    def globus_fn(self) -> str:
+        if self.globus_storage is None:
+            return ""
+        return posixpath.join(self.globus_storage.origin_path, self.filename)
 
     def clone(self, compute_sha: bool = True) -> File:
         result = File.fromdict(self.asdict())
