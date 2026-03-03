@@ -3,9 +3,9 @@ Base classes for different download methods
 """
 from abc import ABC, abstractmethod
 import dataclasses
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import IntEnum, auto
-from typing import Callable, Generic, Optional, TypeVar
+from typing import Callable, Optional
 
 from esgpull.models import File
 
@@ -16,14 +16,17 @@ class FileStatus(IntEnum):
     SUCCESS = auto()
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class FileResult:
     """Download result for one file"""
-    ok: bool
     status: FileStatus
+    file: File
 
-    file_id: str
-    local_path: str
+    @classmethod
+    def fail_all(cls, files: list[File]) -> 'list[FileResult]':
+        """Helper for generic exception handling"""
+        return [cls(FileStatus.FAIL, f) for f in files]
+
 
 @dataclasses.dataclass
 class TaskResult:
@@ -32,13 +35,14 @@ class TaskResult:
 
     In a batch like globus transfer, it's possible that a task can succeed but some individual files may fail
     """
-    ok: bool
+    task_label: str
+
     files: list[FileResult]
 
-    start_time: datetime
-    end_time: datetime
-
     msg: str
+
+    start_time: datetime
+    end_time: datetime = datetime.now(timezone.utc)
 
 
 @dataclasses.dataclass
@@ -46,13 +50,12 @@ class TaskStartInfo:
     """
     Track state for a task that has started. Can be used to return eg, an async globus task ID
     """
-    task_id: str
+    task_label: str
 
     started_at: datetime
+    files: list[File]
     already_done: list[FileResult]  # files that are considered complete before the task even starts
 
-
-S = TypeVar("S", bound=TaskStartInfo)
 
 StartCallback = Callable[[TaskStartInfo], None]
 
@@ -60,40 +63,40 @@ StartCallback = Callable[[TaskStartInfo], None]
 @dataclasses.dataclass
 class TaskHeartbeat:
     """Heartbeat events can be used to guide progress bars"""
-    task_id: str
+    task_label: str
 
-    files_completed: int
-    files_expected: int
+    n_files_completed: int
+    n_files_expected: int
 
     bytes_completed: int
     bytes_expected: int
 
-    event_time: datetime = datetime.now()
+    event_time: datetime = datetime.now(timezone.utc)
 
 HeartbeatCallback = Callable[[TaskHeartbeat], None]
 
 
 ##############
 
-class DownloadTask(ABC, Generic[S]):
+class DownloadTask(ABC):
     """
     A generic downloader task for one or more files. Tasks should be as granular as possible to facilitate reporting:
         eg one file download, one batch globus transfer
     """
     def __init__(
             self,
-            task_id: str,
+            task_label: str,
             files: list[File]
     ) -> None:
-        self._task_id = task_id  # unique label, used for monitoring task progress
+        self._task_label = task_label  # unique label, used for monitoring task progress
 
         self._files = files
+        self._to_download: list[File] = []  # used for uncaught exceptions
 
         self._files_expected = len(files)
         self._bytes_expected = sum(f.size for f in files)
 
         self._start_time: Optional[datetime] = None
-        self._to_download: list[File] = []
 
         self._heartbeat_callbacks: list[HeartbeatCallback] = []
         self._start_callbacks: list[StartCallback] = []
@@ -102,7 +105,7 @@ class DownloadTask(ABC, Generic[S]):
     # Internal helpers
     def _emit_heartbeat(self, files_completed: int, bytes_completed: int) -> None:
         event = TaskHeartbeat(
-            self._task_id,
+            self._task_label,
             files_completed,
             self._files_expected,
             bytes_completed,
@@ -115,20 +118,28 @@ class DownloadTask(ABC, Generic[S]):
         for callback in self._start_callbacks:
             callback(start_info)
 
-    def _fail_all(self, msg: str) -> TaskResult:
+    def to_result(self, msg, file_result: list[FileResult]) -> TaskResult:
+        return TaskResult(
+            self._task_label,
+            file_result,
+            msg,
+            self._start_time,
+        )
+
+    def to_fail(self, msg: str = "An unknown error occurred") -> TaskResult:
         """
         Helper method for unhandled exceptions: task result should convey a failed file result for all files
         """
+        items = self._to_download or self._files
         fr = [
-            FileResult(False, FileStatus.FAIL, f.file_id, f.local_path)
-            for f in self._files
+            FileResult(FileStatus.FAIL, f)
+            for f in items
         ]
         return TaskResult(
-            True,
+            self._task_label,
             fr,
+            msg,
             self._start_time,
-            datetime.now(),
-            msg = msg | 'An unknown error occurred'
         )
 
     ########
@@ -142,6 +153,18 @@ class DownloadTask(ABC, Generic[S]):
 
         How the result is presented is up to the implementation.
         For example, if a file already exists locally, it may be reported as a successful download
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def _run(self, to_download: list[File], skip: list[FileResult]) -> TaskResult:
+        """
+        Execute the download and return its result.
+
+        Implementations are responsible for:
+          - emitting a start event via _emit_start (with a TaskStartInfo or subclass)
+          - emitting heartbeat events via _emit_heartbeat as progress is made
+          - returning a TaskResult when the transfer completes or fails
         """
         raise NotImplementedError
 
@@ -167,22 +190,6 @@ class DownloadTask(ABC, Generic[S]):
         """
         pass
 
-    @abstractmethod
-    async def _start(self, items: list[File]) -> S:
-        """
-        Start the download task and report back.
-
-        Eg, might report a submitted globus task_id, which can be resolved later even if the esgpull process
-            is interrupted
-        """
-        raise NotImplementedError
-
-
-    @abstractmethod
-    async def _result(self, items: list[File]) -> TaskResult:
-        """Report the result"""
-        raise NotImplementedError
-
 
     #########
     # Public API
@@ -204,41 +211,25 @@ class DownloadTask(ABC, Generic[S]):
 
 
     # Task processing
-    async def start(self) -> S:
+    async def run(self) -> TaskResult:
         """
-        Start the task by performing necessary setup and validation. Must be called to prepare any new transfer.
+        Execute the full task lifecycle: pre-check, download, post-check, and cleanup.
 
-        See also: result()
+        Emits a start event (with task-specific info) at the beginning of the transfer,
+        and heartbeat events during download. Both are preserved under their original names.
+
+        NOTE: Some task types (eg Globus) may not resolve within the same process run.
+            A task submitted with a known transfer_id can be re-instantiated to resume polling.
         """
-        self._start_time = datetime.now()
+        self._start_time = datetime.now(timezone.utc)
 
         to_download, skip = await self._pre_check(self._files)
-
         self._to_download = to_download
 
-        start_info = await self._start(to_download)
-        start_info.already_done = skip
-
-        self._emit_start(start_info)
-        return start_info
-
-    async def result(self):
-        """
-        Return the result of the task.
-
-        TODO: Improve interface to handle case of "checking a globus task in next process run"
-            --> Must either have called start here, OR, be checking a previously known task ID
-
-        NOTE: Some task types may not call `result()` during the same run of the esgpull process.
-            Eg a globus transfer task happens async outside the process, and a cron job might prefer to fire-and-forget
-        """
-        if not self._start_time:
-            raise Exception('The download task has not started yet.')
-
-        run_result = await self._result(self._to_download)
+        # FIXME: add exception handling mechanism
+        run_result = await self._run(to_download, skip)
 
         validated = await self._post_check(run_result)
         await self._cleanup(validated)
 
         return run_result
-
