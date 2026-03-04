@@ -14,10 +14,10 @@ from httpx import AsyncClient
 from esgpull.downloader.base import (
     DownloadTask,
     FileResult,
-    FileStatus,
     TaskResult,
     TaskStartInfo,
 )
+from esgpull.models.file import FileStatus
 from esgpull.downloader.fs import Digest, Filesystem
 from esgpull.models import File
 
@@ -79,7 +79,7 @@ class HttpsDownloadTask(DownloadTask):
         to_download, already_done = [], []
         for file in files:
             if self._fs[file].drs.is_file():
-                already_done.append(FileResult(FileStatus.SUCCESS, file))
+                already_done.append(FileResult(FileStatus.Done, file))
             else:
                 to_download.append(file)
         return to_download, already_done
@@ -108,7 +108,7 @@ class HttpsDownloadTask(DownloadTask):
             for file in to_download:
                 file_path = self._fs[file]
                 digest = Digest(file) if not self._disable_checksum else None
-                status = FileStatus.FAIL
+                status = FileStatus.Error
 
                 try:
                     async with aiofiles.open(file_path.tmp, 'wb') as f:
@@ -124,7 +124,7 @@ class HttpsDownloadTask(DownloadTask):
                     file_path.tmp.rename(file_path.done)
 
                     if digest is None or digest.hexdigest() == file.checksum:
-                        status = FileStatus.SUCCESS
+                        status = FileStatus.Done
                         files_completed += 1
                         self._emit_heartbeat(files_completed, bytes_completed)
 
@@ -146,7 +146,7 @@ class HttpsDownloadTask(DownloadTask):
         """
         for fr in result.files:
             file_path = self._fs[fr.file]
-            if fr.status == FileStatus.SUCCESS:
+            if fr.status == FileStatus.Done:
                 if file_path.done.is_file():
                     self._fs.move_to_drs(fr.file)
             else:

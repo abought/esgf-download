@@ -14,11 +14,11 @@ from esgpull import File
 from esgpull.downloader.base import (
     DownloadTask,
     FileResult,
-    FileStatus,
     TaskHeartbeat,
     TaskResult,
     TaskStartInfo,
 )
+from esgpull.models.file import FileStatus
 
 
 @dataclasses.dataclass
@@ -66,7 +66,8 @@ class GlobusDownloadTask(DownloadTask):
             # This is used to check an existing task in progress
             transfer_id: Optional[str] = None,
 
-            poll_time: int = 60 * 1
+            poll_time: int = 60 * 1,
+            wait_until_resolved: bool = True,
     ) -> None:
         super().__init__(task_label, files)
 
@@ -78,8 +79,7 @@ class GlobusDownloadTask(DownloadTask):
 
         # For long transfers, default poll time will increase up to a system-provided max
         self._poll_time = poll_time
-
-        # TODO: implement a way to skip start setup if this is provided, maybe consolidate start and result methods accordingly?
+        self._wait_until_resolved = wait_until_resolved
         self._transfer_id = transfer_id
 
     def to_fail(self, msg: str = "An unknown error occurred") -> GlobusTaskResult:
@@ -131,13 +131,13 @@ class GlobusDownloadTask(DownloadTask):
             skip_resp = self._client.paginated.task_skipped_errors(self._transfer_id)
             skipped_paths = {f['source_path'] for f in skip_resp.items()}
             results = [
-                FileResult(FileStatus.SUCCESS if path not in skipped_paths else FileStatus.FAIL, f)
+                FileResult(FileStatus.Done if path not in skipped_paths else FileStatus.Error, f)
                 for f in self._files
                 for path in (f.globus_path,)
             ]
         else:
             # If it wasn't skipped due to an error, then assume it was successfully transferred
-            results = [FileResult(FileStatus.SUCCESS, f) for f in self._files]
+            results = [FileResult(FileStatus.Done, f) for f in self._files]
 
         return GlobusTaskResult(
             self._task_label,
@@ -153,6 +153,28 @@ class GlobusDownloadTask(DownloadTask):
         """The globus transfer result will automatically handle skip logic and missing files."""
         return files, []
 
+    async def _check_transfer_status(self, resp: GlobusHTTPResponse) -> GlobusTaskResult | None:
+        """
+        Interpret one transfer status response.
+
+        Returns a GlobusTaskResult for terminal states (SUCCEEDED, FAILED),
+        or None if the transfer is still in progress (ACTIVE, INACTIVE).
+        """
+        # TODO verify- since some files may be skipped, checksummed may be the most useful metric for progress bar
+        n_files_completed = resp.data['files_skipped'] + resp.data['files_transferred']
+        bytes_completed = resp.data['bytes_checksummed']
+        self._emit_heartbeat(n_files_completed, bytes_completed)
+
+        status = _GlobusTransferStatus[resp.data['status']]
+        match status:
+            case _GlobusTransferStatus.ACTIVE | _GlobusTransferStatus.INACTIVE:
+                # FIXME: slightly tweak this branch for clarity
+                return None
+            case _GlobusTransferStatus.FAILED:
+                return self.to_fail(msg="The transfer has failed")
+            case _GlobusTransferStatus.SUCCEEDED:
+                return await self._parse_success_result(resp)
+
     async def _run(self, items: list[File], skip: list[FileResult]) -> TaskResult:
         if self._transfer_id is None:
             td = self._make_transfer_data(items)
@@ -161,31 +183,34 @@ class GlobusDownloadTask(DownloadTask):
 
             start_info = GlobusTaskStartInfo(self._task_label, self._start_time, items, skip, self._transfer_id)
             self._emit_start(start_info)
+        else:
+            logging.info(f'Checking existing Globus transfer task: {self._transfer_id}')
 
-            logging.info('No new transfer task was created; checking existing transfer task status')
-
-        while True:
-            resp = self._client.get_task(self._transfer_id)  # alas, globus sdk doesn't have async variants
-            status = _GlobusTransferStatus[resp.data['status']]  # ACTIVE can include Queued , so this could be set to poll less often
-
-            # TODO verify- since some files may be skipped, checksummed may be the most useful metric for progress bar
-            n_files_completed = resp.data['files_skipped'] + resp.data['files_transferred']
-            bytes_completed = resp.data['bytes_checksummed']
-
-            self._emit_heartbeat(n_files_completed, bytes_completed)
-
-            match status:
-                case _GlobusTransferStatus.ACTIVE | _GlobusTransferStatus.INACTIVE:
-                    # TODO client svc creds shouldn't expire; revisit inactive handling when we add user login mode, may want extra warnings then
-                    max_poll_time = 60 * 10
-                    if self._poll_time < max_poll_time:
-                        self._poll_time = max(self._poll_time + 15, max_poll_time)
-                    await asyncio.sleep(self._poll_time)
-                case _GlobusTransferStatus.FAILED:
-                    return self.to_fail(msg="The transfer has failed")
-                case _GlobusTransferStatus.SUCCEEDED:
-                    # A transfer can be a partial success; examine this state more carefully.
-                    return await self._parse_success_result(resp)
+        if self._wait_until_resolved:
+            while True:
+                resp = self._client.get_task(self._transfer_id)  # alas, globus sdk doesn't have async variants
+                result = await self._check_transfer_status(resp)
+                if result is not None:
+                    return result
+                # TODO client svc creds shouldn't expire; revisit inactive handling when we add user login mode
+                max_poll_time = 60 * 10
+                if self._poll_time < max_poll_time:
+                    self._poll_time = max(self._poll_time + 15, max_poll_time)
+                await asyncio.sleep(self._poll_time)
+        else:
+            resp = self._client.get_task(self._transfer_id)
+            result = await self._check_transfer_status(resp)
+            if result is not None:
+                return result
+            # Transfer still in progress; report all files as Started
+            fr = [FileResult(FileStatus.Started, f) for f in items]
+            return GlobusTaskResult(
+                self._task_label,
+                fr,
+                'Transfer in progress',
+                self._start_time,
+                globus_task_id=self._transfer_id,
+            )
 
     async def _post_check(self, result: TaskResult) -> TaskResult:
         """

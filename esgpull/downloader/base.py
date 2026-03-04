@@ -4,16 +4,10 @@ Base classes for different download methods
 from abc import ABC, abstractmethod
 import dataclasses
 from datetime import datetime, timezone
-from enum import IntEnum, auto
 from typing import Callable, Optional
 
 from esgpull.models import File
-
-############
-# Status tracking for task lifecycle events
-class FileStatus(IntEnum):
-    FAIL = auto()
-    SUCCESS = auto()
+from esgpull.models.file import FileStatus
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25,7 +19,7 @@ class FileResult:
     @classmethod
     def fail_all(cls, files: list[File]) -> 'list[FileResult]':
         """Helper for generic exception handling"""
-        return [cls(FileStatus.FAIL, f) for f in files]
+        return [cls(FileStatus.Error, f) for f in files]
 
 
 @dataclasses.dataclass
@@ -132,7 +126,7 @@ class DownloadTask(ABC):
         """
         items = self._to_download or self._files
         fr = [
-            FileResult(FileStatus.FAIL, f)
+            FileResult(FileStatus.Error, f)
             for f in items
         ]
         return TaskResult(
