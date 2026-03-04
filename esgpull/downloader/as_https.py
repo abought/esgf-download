@@ -1,18 +1,163 @@
-# from math import ceil
+from __future__ import annotations
+
+import ssl
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
 
+import contextlib
+
+import aiofiles
+import httpx
 from httpx import AsyncClient
 
-from esgpull.downloader.fs import Digest
+from esgpull.downloader.base import (
+    DownloadTask,
+    FileResult,
+    FileStatus,
+    TaskResult,
+    TaskStartInfo,
+)
+from esgpull.downloader.fs import Digest, Filesystem
 from esgpull.models import File
 
-# import asyncio
-# from urllib.parse import urlsplit
-# from esgpull.auth import Auth
-# from esgpull.context import Context
 
+def _make_ssl_context(disable_ssl: bool) -> ssl.SSLContext | bool:
+    """
+    Build an SSL context appropriate for the installed OpenSSL version.
+
+    TODO: Are there still ESGF nodes that don't work with (modern/any) SSL? If not, can we omit this?
+
+    """
+    if disable_ssl:
+        return False
+    if ssl.OPENSSL_VERSION_INFO[0] >= 3:
+        ctx = ssl.create_default_context()
+        ctx.options |= 0x4  # OP_LEGACY_SERVER_CONNECT — required for some ESGF nodes with older TLS
+        return ctx
+    return True
+
+
+class HttpsDownloadTask(DownloadTask):
+    """
+    Download a batch of files over HTTPS using httpx.
+
+    A single AsyncClient is shared across all files in the task for connection reuse.
+    Files are downloaded sequentially within the task; use the orchestrator's
+    max_concurrent setting for parallelism across tasks.
+
+    Lifecycle:
+      _pre_check  — skip files already present at their final DRS path
+      _run        — download each file to a .part temp file, compute a running digest,
+                    rename to .done on completion, and verify checksum inline
+      _post_check — no-op (checksum is verified during _run)
+      _cleanup    — move .done files to their final DRS path on success;
+                    delete .done/.part temp files on failure
+    """
+
+    def __init__(
+        self,
+        task_label: str,
+        files: list[File],
+        fs: Filesystem,
+        chunk_size: int = 1024 * 1024,
+        disable_checksum: bool = False,
+        disable_ssl: bool = False,
+        http_timeout: float = 120.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        super().__init__(task_label, files)
+        self._fs = fs
+        self._chunk_size = chunk_size
+        self._disable_checksum = disable_checksum
+        self._ssl_context = _make_ssl_context(disable_ssl)
+        self._http_timeout = http_timeout
+        self._client = client
+
+    async def _pre_check(self, files: list[File]) -> tuple[list[File], list[FileResult]]:
+        """Skip files that already exist at their final DRS path."""
+        to_download, already_done = [], []
+        for file in files:
+            if self._fs[file].drs.is_file():
+                already_done.append(FileResult(FileStatus.SUCCESS, file))
+            else:
+                to_download.append(file)
+        return to_download, already_done
+
+    async def _run(self, to_download: list[File], skip: list[FileResult]) -> TaskResult:
+        self._emit_start(TaskStartInfo(
+            self._task_label,
+            self._start_time,
+            to_download,
+            skip,
+        ))
+
+        results: list[FileResult] = list(skip)
+        files_completed = len(skip)
+        bytes_completed = sum(fr.file.size for fr in skip)
+
+        if self._client is not None:
+            client_ctx = contextlib.nullcontext(self._client)
+        else:
+            client_ctx = httpx.AsyncClient(
+                follow_redirects=True,
+                verify=self._ssl_context,
+                timeout=self._http_timeout,
+            )
+        async with client_ctx as client:
+            for file in to_download:
+                file_path = self._fs[file]
+                digest = Digest(file) if not self._disable_checksum else None
+                status = FileStatus.FAIL
+
+                try:
+                    async with aiofiles.open(file_path.tmp, 'wb') as f:
+                        async with client.stream('GET', file.url) as resp:
+                            resp.raise_for_status()
+                            async for chunk in resp.aiter_bytes(chunk_size=self._chunk_size):
+                                await f.write(chunk)
+                                if digest is not None:
+                                    digest.update(chunk)
+                                bytes_completed += len(chunk)
+                                self._emit_heartbeat(files_completed, bytes_completed)
+
+                    file_path.tmp.rename(file_path.done)
+
+                    if digest is None or digest.hexdigest() == file.checksum:
+                        status = FileStatus.SUCCESS
+                        files_completed += 1
+                        self._emit_heartbeat(files_completed, bytes_completed)
+
+                except Exception:
+                    pass  # status stays FAIL
+
+                results.append(FileResult(status, file))
+
+        return self.to_result('Download complete', results)
+
+    async def _post_check(self, result: TaskResult) -> TaskResult:
+        """Checksum verification is performed inline during _run; nothing further to check."""
+        return result
+
+    async def _cleanup(self, result: TaskResult) -> None:
+        """
+        Move successfully downloaded files to their final DRS path.
+        Delete any .done or .part temp files left behind by failures.
+        """
+        for fr in result.files:
+            file_path = self._fs[fr.file]
+            if fr.status == FileStatus.SUCCESS:
+                if file_path.done.is_file():
+                    self._fs.move_to_drs(fr.file)
+            else:
+                for path in (file_path.done, file_path.tmp):
+                    if path.is_file():
+                        path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Legacy streaming helpers — retained for use by pipeline.py
+# ---------------------------------------------------------------------------
 
 @dataclass
 class DownloadCtx:
@@ -64,102 +209,3 @@ class Simple(BaseDownloader):
                 ctx.chunk = chunk
                 ctx.update_digest()
                 yield ctx
-
-
-# class Distributed(BaseDownloader):
-#     """
-#     Distributed chunked async downloader.
-#     Fetches chunks from multiple URLs pointing to the same file.
-#     """
-
-#     def __init__(
-#         self,
-#         auth: Auth,
-#         *,
-#         file: File | None = None,
-#         url: str | None = None,
-#         config: Config | None = None,
-#         max_ping: float = 5.0,
-#     ) -> None:
-#         super().__init__(auth, file=file, url=url, config=config)
-#         self.max_ping = max_ping
-
-#     async def try_url(self, url: str, client: AsyncClient) -> str | None:
-#         result = None
-#         node = urlsplit(url).netloc
-#         print(f"trying url on '{node}'")
-#         try:
-#             resp = await client.head(url)
-#             print(f"got response on '{node}'")
-#             resp.raise_for_status()
-#             accept_ranges = resp.headers.get("Accept-Ranges")
-#             content_length = resp.headers.get("Content-Length")
-#             if (
-#                 accept_ranges == "bytes"
-#                 and int(content_length) == self.file.size
-#             ):
-#                 result = str(resp.url)
-#             else:
-#                 print(dict(resp.headers))
-#         except HTTPError as err:
-#             print(type(err))
-#             print(err.request.headers)
-#         return result
-
-#     async def process_queue(
-#         self, url: str, queue: asyncio.Queue
-#     ) -> tuple[list[tuple[int, bytes]], str]:
-#         node = urlsplit(url).netloc
-#         print(f"starting process on '{node}'")
-#         chunks: list[tuple[int, bytes]] = []
-#         async with self.make_client() as client:
-#             final_url = await self.try_url(url, client)
-#             if final_url is None:
-#                 print(f"no url found for '{node}'")
-#                 return chunks, url
-#             else:
-#                 url = final_url
-#             while not queue.empty():
-#                 chunk_idx = await queue.get()
-#                 print(f"processing chunk {chunk_idx} on '{node}'")
-#                 start = chunk_idx * self.config.download.chunk_size
-#                 end = min(
-#                     self.file.size,
-#                     (chunk_idx + 1) * self.config.download.chunk_size - 1,
-#                 )
-#                 headers = {"Range": f"bytes={start}-{end}"}
-#                 resp = await client.get(url, headers=headers)
-#                 queue.task_done()
-#                 if resp.status_code == 206:
-#                     chunks.append((chunk_idx, resp.content))
-#                 else:
-#                     await queue.put(chunk_idx)
-#                     print(f"error status {resp.status_code} on '{node}'")
-#                     break
-#         return chunks, url
-
-#     async def fetch_urls(self) -> list[str]:
-#         ctx = Context(distrib=True)
-#         ctx.query.instance_id = self.file.file_id
-#         results = await ctx._search(file=True)
-#         files = [File.from_dict(item) for item in results]
-#         return [file.url for file in files]
-
-# async def aget(self) -> bytes:
-#     nb_chunks = ceil(self.file.size / self.config.download.chunk_size)
-#     queue: asyncio.Queue[int] = asyncio.Queue(nb_chunks)
-#     for chunk_idx in range(nb_chunks):
-#         queue.put_nowait(chunk_idx)
-#     completed: list[bool] = [False for _ in range(nb_chunks)]
-#     chunks: list[bytes] = [bytes() for _ in range(nb_chunks)]
-#     urls = await self.fetch_urls()
-#     workers = [self.process_queue(url, queue) for url in urls]
-#     for future in asyncio.as_completed(workers):
-#         some_chunks, url = await future
-#         print(f"got {len(some_chunks)} chunks from {url}")
-#         for chunk_idx, chunk in some_chunks:
-#             completed[chunk_idx] = True
-#             chunks[chunk_idx] = chunk
-#     if not all(completed):
-#         raise ValueError("TODO: progressive write (with .part file)")
-#     return b"".join(chunks)
