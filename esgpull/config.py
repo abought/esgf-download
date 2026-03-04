@@ -32,6 +32,7 @@ def _get_root() -> Path:
 
 
 class Paths(BaseModel, validate_assignment=True, validate_default=True):
+    auth: Path = Path("auth")
     data: Path = Path("data")
     db: Path = Path("db")
     log: Path = Path("log")
@@ -39,6 +40,7 @@ class Paths(BaseModel, validate_assignment=True, validate_default=True):
     plugins: Path = Path("plugins")
 
     @field_validator(
+        "auth",
         "data",
         "db",
         "log",
@@ -54,6 +56,7 @@ class Paths(BaseModel, validate_assignment=True, validate_default=True):
         return value
 
     def values(self) -> Iterator[Path]:
+        yield self.auth
         yield self.data
         yield self.db
         yield self.log
@@ -229,15 +232,6 @@ def fix_rename_search_api(doc: dict) -> dict:
     return doc
 
 
-def fix_remove_auth(doc: dict) -> dict:
-    if "paths" in doc and "auth" in doc["paths"]:
-        logger.warn(
-            "Deprecated 'paths.auth' is present in your config, "
-            "you can remove it safely."
-        )
-        doc["paths"].pop("auth")
-    return doc
-
 
 def iter_keys(
     source: Mapping,
@@ -270,7 +264,7 @@ def pop_and_clear_empty_parents(source: Mapping, ckey: ConfigKey):
             break  # Stop if we hit a non-empty container
 
 
-config_fixers = [fix_rename_search_api, fix_remove_auth]
+config_fixers = [fix_rename_search_api]
 
 
 class TomlKitConfigSettingsSource(TomlConfigSettingsSource):
