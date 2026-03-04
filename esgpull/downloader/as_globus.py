@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import enum
+import logging
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -64,7 +65,6 @@ class GlobusDownloadTask(DownloadTask):
 
             # This is used to check an existing task in progress
             transfer_id: Optional[str] = None,
-
 
             poll_time: int = 60 * 1
     ) -> None:
@@ -159,8 +159,10 @@ class GlobusDownloadTask(DownloadTask):
             resp = self._client.submit_transfer(td)
             self._transfer_id = resp.data['task_id']
 
-        start_info = GlobusTaskStartInfo(self._task_label, self._start_time, items, skip, self._transfer_id)
-        self._emit_start(start_info)
+            start_info = GlobusTaskStartInfo(self._task_label, self._start_time, items, skip, self._transfer_id)
+            self._emit_start(start_info)
+
+            logging.info('No new transfer task was created; checking existing transfer task status')
 
         while True:
             resp = self._client.get_task(self._transfer_id)  # alas, globus sdk doesn't have async variants
