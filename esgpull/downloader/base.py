@@ -1,6 +1,7 @@
 """
 Base classes for different download methods
 """
+import asyncio
 from abc import ABC, abstractmethod
 import dataclasses
 from datetime import datetime, timezone
@@ -26,29 +27,27 @@ class FileResult:
 class TaskResult:
     """
     Report the result of the overall task, which may include multiple files
-
-    In a batch like globus transfer, it's possible that a task can succeed but some individual files may fail
     """
     task_label: str
 
-    files: list[FileResult]
+    files: list[FileResult]  # Omits `already_done` files (per TaskStartInfo) and lists only new work done
 
     msg: str
 
     start_time: datetime
-    end_time: datetime = datetime.now(timezone.utc)
+    end_time: datetime = dataclasses.field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclasses.dataclass
 class TaskStartInfo:
     """
-    Track state for a task that has started. Can be used to return eg, an async globus task ID
+    Track state for a task that has started. May be extended per task type
     """
     task_label: str
 
     started_at: datetime
     files: list[File]
-    already_done: list[FileResult]  # files that are considered complete before the task even starts
+    already_done: list[FileResult]  # files that are considered complete and will  be skipped
 
 
 StartCallback = Callable[[TaskStartInfo], None]
@@ -65,7 +64,7 @@ class TaskHeartbeat:
     bytes_completed: int
     bytes_expected: int
 
-    event_time: datetime = datetime.now(timezone.utc)
+    event_time: datetime = dataclasses.field(default_factory=lambda: datetime.now(timezone.utc))
 
 HeartbeatCallback = Callable[[TaskHeartbeat], None]
 
@@ -108,9 +107,18 @@ class DownloadTask(ABC):
         for callback in self._heartbeat_callbacks:
             callback(event)
 
-    def _emit_start(self, start_info: TaskStartInfo) -> None:
+    def _make_start_info(self, to_download: list[File], skip: list[FileResult]) -> TaskStartInfo:
+        """
+        Construct the start event. Subclasses may choose to add fields as needed.
+        """
+        return TaskStartInfo(self._task_label, self._start_time, to_download, skip)
+
+    def _emit_start(self, event: TaskStartInfo) -> None:
+        """
+        Broadcast a task start event
+        """
         for callback in self._start_callbacks:
-            callback(start_info)
+            callback(event)
 
     def to_result(self, msg, file_result: list[FileResult]) -> TaskResult:
         return TaskResult(
@@ -119,6 +127,13 @@ class DownloadTask(ABC):
             msg,
             self._start_time,
         )
+
+    @abstractmethod
+    def to_cancel(self) -> TaskResult:
+        """
+        Define how to record status if the program is interrupted.
+        """
+        raise NotImplementedError
 
     def to_fail(self, msg: str = "An unknown error occurred") -> TaskResult:
         """
@@ -163,26 +178,11 @@ class DownloadTask(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def _post_check(self, result: TaskResult) -> TaskResult :
+    async def _cleanup(self, result: TaskResult) -> TaskResult:
         """
-        Check if the file(s) downloaded correctly.
-
-        For example, this might entail validating checksums of what was transferred
-
-        Returns a tuple of (valid_file_results, invalid_file_results)
-
-        How the result is presented is up to the implementation.
-
+        Perform any necessary cleanup steps. (deleting temp files, moving to final location, etc)
         """
         raise NotImplementedError
-
-    @abstractmethod
-    async def _cleanup(self, result: TaskResult) -> None:
-        """
-        Perform any necessary cleanup. For example, if a file fails checksum validation after download,
-            it might be deleted from the local copy
-        """
-        pass
 
 
     #########
@@ -207,7 +207,7 @@ class DownloadTask(ABC):
     # Task processing
     async def run(self) -> TaskResult:
         """
-        Execute the full task lifecycle: pre-check, download, post-check, and cleanup.
+        Execute the full task lifecycle: pre-check, download, and cleanup.
 
         Emits a start event (with task-specific info) at the beginning of the transfer,
         and heartbeat events during download. Both are preserved under their original names.
@@ -220,10 +220,14 @@ class DownloadTask(ABC):
         to_download, skip = await self._pre_check(self._files)
         self._to_download = to_download
 
-        # FIXME: add exception handling mechanism
-        run_result = await self._run(to_download, skip)
+        event = self._make_start_info(to_download, skip)
+        self._emit_start(event)
 
-        validated = await self._post_check(run_result)
-        await self._cleanup(validated)
-
-        return run_result
+        try:
+            run_result = await self._run(to_download, skip)
+            return await self._cleanup(run_result)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Run cleanup (eg delete partial downloads) before propagating.
+            # The worker's exception handler is responsible for recording the result.
+            await self._cleanup(self.to_cancel())
+            raise

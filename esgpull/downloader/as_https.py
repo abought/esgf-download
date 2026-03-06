@@ -15,7 +15,6 @@ from esgpull.downloader.base import (
     DownloadTask,
     FileResult,
     TaskResult,
-    TaskStartInfo,
 )
 from esgpull.models.file import FileStatus
 from esgpull.downloader.fs import Digest, Filesystem
@@ -41,25 +40,15 @@ def _make_ssl_context(disable_ssl: bool) -> ssl.SSLContext | bool:
 
 class HttpsDownloadTask(DownloadTask):
     """
-    Download a batch of files over HTTPS using httpx.
-
-    A single AsyncClient is shared across all files in the task for connection reuse.
-    Files are downloaded sequentially within the task; use the orchestrator's
-    max_concurrent setting for parallelism across tasks.
-
-    Lifecycle:
-      _pre_check  — skip files already present at their final DRS path
-      _run        — download each file to a .part temp file, compute a running digest,
-                    rename to .done on completion, and verify checksum inline
-      _post_check — no-op (checksum is verified during _run)
-      _cleanup    — move .done files to their final DRS path on success;
-                    delete .done/.part temp files on failure
+    Download (usually one) item from a URL to a local file
     """
 
     def __init__(
         self,
+        # Shared options
         task_label: str,
         files: list[File],
+        # URL-specific options
         fs: Filesystem,
         chunk_size: int = 1024 * 1024,
         disable_checksum: bool = False,
@@ -75,6 +64,14 @@ class HttpsDownloadTask(DownloadTask):
         self._http_timeout = http_timeout
         self._client = client
 
+    def to_cancel(self) -> TaskResult:
+        """When a local download is interrupted, mark file as eligible for retry later"""
+        files = self._to_download or self._files
+        return self.to_result(
+            'Download cancelled',
+            [FileResult(FileStatus.Cancelled, f) for f in files],
+        )
+
     async def _pre_check(self, files: list[File]) -> tuple[list[File], list[FileResult]]:
         """Skip files that already exist at their final DRS path."""
         to_download, already_done = [], []
@@ -86,14 +83,7 @@ class HttpsDownloadTask(DownloadTask):
         return to_download, already_done
 
     async def _run(self, to_download: list[File], skip: list[FileResult]) -> TaskResult:
-        self._emit_start(TaskStartInfo(
-            self._task_label,
-            self._start_time,
-            to_download,
-            skip,
-        ))
-
-        results: list[FileResult] = list(skip)
+        results: list[FileResult] = []
         files_completed = len(skip)
         bytes_completed = sum(fr.file.size for fr in skip)
 
@@ -122,26 +112,25 @@ class HttpsDownloadTask(DownloadTask):
                                 bytes_completed += len(chunk)
                                 self._emit_heartbeat(files_completed, bytes_completed)
 
+
                     file_path.tmp.rename(file_path.done)
 
                     if digest is None or digest.hexdigest() == file.checksum:
                         status = FileStatus.Done
-                        files_completed += 1
-                        self._emit_heartbeat(files_completed, bytes_completed)
 
                 except:
+                    # Log exception; external caller just sees the task marked as failed
                     logger.exception(f"Download failed for file {file.file_id} in task {self._task_label}")
-                    pass  # status stays FAIL
+                    pass
 
+                # Report the file as processed for progress tracking purposes
                 results.append(FileResult(status, file))
+                files_completed += 1
+                self._emit_heartbeat(files_completed, bytes_completed)
 
         return self.to_result('Download complete', results)
 
-    async def _post_check(self, result: TaskResult) -> TaskResult:
-        """Checksum verification is performed inline during _run; nothing further to check."""
-        return result
-
-    async def _cleanup(self, result: TaskResult) -> None:
+    async def _cleanup(self, result: TaskResult) -> TaskResult:
         """
         Move successfully downloaded files to their final DRS path.
         Delete any .done or .part temp files left behind by failures.
@@ -155,6 +144,7 @@ class HttpsDownloadTask(DownloadTask):
                 for path in (file_path.done, file_path.tmp):
                     if path.is_file():
                         path.unlink()
+        return result
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,8 @@ from typing import Optional, TYPE_CHECKING
 
 from globus_sdk import TransferData, GlobusHTTPResponse
 
+from esgpull.models import GlobusTransferStatus
+
 if TYPE_CHECKING:
     from globus_sdk import TransferClient
 
@@ -34,6 +36,7 @@ class GlobusTaskHeartbeat(TaskHeartbeat):
 @dataclasses.dataclass
 class GlobusTaskResult(TaskResult):
     globus_task_id: str = dataclasses.field(kw_only=True)
+    globus_task_status: GlobusTransferStatus = dataclasses.field(kw_only=True)
 
 
 class _GlobusTransferStatus(enum.Enum):
@@ -56,12 +59,14 @@ class GlobusDownloadTask(DownloadTask):
             files,
             client: TransferClient,
 
-            # All files in this batch must be in same source collection
-            source_collection_id: str,
-
             # Typically set in esgpull config
             dest_collection_id: str,
             dest_root_path: str,
+
+            # All files in this batch must be in same source collection.
+            # Required when submitting a new transfer; may be omitted when
+            # transfer_id is provided (re-poll mode) since it is unused then.
+            source_collection_id: Optional[str] = None,
 
             # This is used to check an existing task in progress
             transfer_id: Optional[str] = None,
@@ -69,6 +74,11 @@ class GlobusDownloadTask(DownloadTask):
             poll_time: int = 60 * 1,
             wait_until_resolved: bool = True,
     ) -> None:
+        if source_collection_id is None and transfer_id is None:
+            raise ValueError(
+                "Either source_collection_id or transfer_id must be provided"
+            )
+
         super().__init__(task_label, files)
 
         self._client = client
@@ -82,6 +92,31 @@ class GlobusDownloadTask(DownloadTask):
         self._wait_until_resolved = wait_until_resolved
         self._transfer_id = transfer_id
 
+    def to_cancel(self) -> GlobusTaskResult:
+        if self._transfer_id is not None:
+            # The transfer is running server-side and will continue after the local
+            # process exits. Leave files in Started so check_transfers() can resolve them.
+            fr = [FileResult(FileStatus.Started, f) for f in self._files]
+            return GlobusTaskResult(
+                self._task_label,
+                fr,
+                'Transfer interrupted locally; Globus transfer continues',
+                self._start_time,
+                globus_task_id=self._transfer_id,
+                globus_task_status=GlobusTransferStatus.ACTIVE,
+            )
+        else:
+            # Transfer was never submitted; treat as a local cancellation.
+            fr = [FileResult(FileStatus.Cancelled, f) for f in self._files]
+            return GlobusTaskResult(
+                self._task_label,
+                fr,
+                'Transfer cancelled before submission',
+                self._start_time,
+                globus_task_id='',
+                globus_task_status=GlobusTransferStatus.FAILED,
+            )
+
     def to_fail(self, msg: str = "An unknown error occurred") -> GlobusTaskResult:
         fr = FileResult.fail_all(self._files)
         return GlobusTaskResult(
@@ -90,6 +125,7 @@ class GlobusDownloadTask(DownloadTask):
             msg,
             self._start_time,
             globus_task_id=self._transfer_id,
+            globus_task_status=GlobusTransferStatus.FAILED,
         )
 
 
@@ -145,6 +181,7 @@ class GlobusDownloadTask(DownloadTask):
             'Transfer succeeded',
             self._start_time,
             globus_task_id=self._transfer_id,
+            globus_task_status=GlobusTransferStatus.SUCCEEDED,
         )
 
 
@@ -152,6 +189,9 @@ class GlobusDownloadTask(DownloadTask):
     async def _pre_check(self, files: list[File]) -> tuple[list[File], list[FileResult]]:
         """The globus transfer result will automatically handle skip logic and missing files."""
         return files, []
+
+    def _make_start_info(self, to_download: list[File], skip: list[FileResult]) -> GlobusTaskStartInfo:
+        return GlobusTaskStartInfo(self._task_label, self._start_time, to_download, skip, self._transfer_id)
 
     async def _check_transfer_status(self, resp: GlobusHTTPResponse) -> GlobusTaskResult | None:
         """
@@ -180,9 +220,6 @@ class GlobusDownloadTask(DownloadTask):
             td = self._make_transfer_data(items)
             resp = self._client.submit_transfer(td)
             self._transfer_id = resp.data['task_id']
-
-            start_info = GlobusTaskStartInfo(self._task_label, self._start_time, items, skip, self._transfer_id)
-            self._emit_start(start_info)
         else:
             logger.info(f'Checking existing Globus transfer task: {self._transfer_id}')
 
@@ -210,18 +247,11 @@ class GlobusDownloadTask(DownloadTask):
                 'Transfer in progress',
                 self._start_time,
                 globus_task_id=self._transfer_id,
+                globus_task_status=GlobusTransferStatus.ACTIVE,
             )
-
-    async def _post_check(self, result: TaskResult) -> TaskResult:
-        """
-        The globus transfer service already verifies checksum integrity, and we don't attempt to guard
-            against the catalog advertising a hash different than the file actually available
-        """
-        return result
 
     async def _cleanup(self, result: TaskResult) -> TaskResult:
         """
-        For now, we explicitly do not perform cleanup, because a partially transferred failure uses globus sync mode
-            to reduce data moved on retry
+        No cleanup: on retry of partial failure, we use sync mode to minimize data moved
         """
         return result

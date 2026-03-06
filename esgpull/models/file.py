@@ -10,15 +10,15 @@ from esgpull.models.utils import find_str
 
 
 class FileStatus(Enum):
-    New = "new"
-    Queued = "queued"
-    Starting = "starting"
-    Started = "started"
-    Pausing = "pausing"
-    Paused = "paused"
-    Error = "error"
-    Cancelled = "cancelled"
-    Done = "done"
+    New = "new"          # ORM default; immediately overwritten to Queued in normal flows
+    Queued = "queued"    # Eligible for download or retry
+    Starting = "starting"  # Task scheduled
+    Started = "started"    # Task running
+    Pausing = "pausing"  # Possibly unused
+    Paused = "paused"    # Possibly unused
+    Error = "error"      # download failed (retryable)
+    Cancelled = "cancelled"  # interrupted before completion (retryable)
+    Done = "done"        # file successfully downloaded
 
     @classmethod
     def retryable(cls) -> list[FileStatus]:
