@@ -6,6 +6,7 @@ from esgpull.models import Table
 from esgpull.models.dataset import Dataset
 from esgpull.models.facet import Facet
 from esgpull.models.file import FileStatus
+from esgpull.models.globus_transfer import GlobusTransfer, GlobusTransferStatus
 from esgpull.models.query import File, Query, query_file_proxy, query_tag_proxy
 from esgpull.models.selection import Selection, selection_facet_proxy
 from esgpull.models.synda_file import SyndaFile
@@ -104,6 +105,31 @@ class file:
     @staticmethod
     def with_status(*status: FileStatus) -> sa.Select[tuple[File]]:
         return sa.select(File).where(File.status.in_(status))
+
+    @staticmethod
+    @functools.cache
+    def ready_for_download() -> sa.Select[tuple[File]]:
+        """
+        Select files that are eligible to download or retry.
+
+        Includes files with status Queued, Error, or Cancelled, excluding any
+        file currently claimed by an in-progress Globus transfer (ACTIVE or
+        INACTIVE). Files linked to a terminal Globus transfer (FAILED or
+        SUCCEEDED) are included so they can be retried.
+        """
+        eligible_statuses = [FileStatus.Queued, *FileStatus.retryable()]
+        in_progress_globus = [GlobusTransferStatus.ACTIVE, GlobusTransferStatus.INACTIVE]
+        return (
+            sa.select(File)
+            .outerjoin(File.globus_transfer)
+            .where(File.status.in_(eligible_statuses))
+            .where(
+                sa.or_(
+                    File.globus_transfer_task_id.is_(None),
+                    GlobusTransfer.status.not_in(in_progress_globus),
+                )
+            )
+        )
 
     @staticmethod
     def with_file_id(file_id: str) -> sa.Select[tuple[str]]:

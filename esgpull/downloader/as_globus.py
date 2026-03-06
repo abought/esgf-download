@@ -1,7 +1,6 @@
 import asyncio
 import dataclasses
 import enum
-import logging
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -19,6 +18,7 @@ from esgpull.downloader.base import (
     TaskStartInfo,
 )
 from esgpull.models.file import FileStatus
+from esgpull.tui import logger
 
 
 @dataclasses.dataclass
@@ -184,7 +184,7 @@ class GlobusDownloadTask(DownloadTask):
             start_info = GlobusTaskStartInfo(self._task_label, self._start_time, items, skip, self._transfer_id)
             self._emit_start(start_info)
         else:
-            logging.info(f'Checking existing Globus transfer task: {self._transfer_id}')
+            logger.info(f'Checking existing Globus transfer task: {self._transfer_id}')
 
         if self._wait_until_resolved:
             while True:

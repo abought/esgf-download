@@ -20,6 +20,7 @@ from esgpull.downloader.base import (
 from esgpull.models.file import FileStatus
 from esgpull.downloader.fs import Digest, Filesystem
 from esgpull.models import File
+from esgpull.tui import logger
 
 
 def _make_ssl_context(disable_ssl: bool) -> ssl.SSLContext | bool:
@@ -128,7 +129,8 @@ class HttpsDownloadTask(DownloadTask):
                         files_completed += 1
                         self._emit_heartbeat(files_completed, bytes_completed)
 
-                except Exception:
+                except:
+                    logger.exception(f"Download failed for file {file.file_id} in task {self._task_label}")
                     pass  # status stays FAIL
 
                 results.append(FileResult(status, file))
