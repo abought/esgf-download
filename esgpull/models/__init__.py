@@ -1,6 +1,6 @@
 from typing import TypeVar
 
-from esgpull.models.base import Base
+from esgpull.models.base import Base, _BaseModel
 from esgpull.models.dataset import Dataset, DatasetRecord
 from esgpull.models.facet import Facet
 from esgpull.models.file import FastFile, FileStatus
@@ -12,7 +12,7 @@ from esgpull.models.selection import Selection
 from esgpull.models.synda_file import SyndaFile
 from esgpull.models.tag import Tag
 
-Table = TypeVar("Table", bound=Base)
+Table = TypeVar("Table", bound=_BaseModel)
 
 __all__ = [
     "Base",
