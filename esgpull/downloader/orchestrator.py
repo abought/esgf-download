@@ -44,8 +44,8 @@ class Orchestrator:
 
             for cb in self._start_callbacks:
                 task.on_start(cb)
-            for cb in self._heartbeat_callbacks:
-                task.on_heartbeat(cb)
+            for hb in self._heartbeat_callbacks:
+                task.on_heartbeat(hb)
 
             try:
                 result = await task.run()

@@ -1,9 +1,8 @@
 """
 Factory functions for creating download tasks from a list of files.
 """
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
-
-from jedi.inference.value.iterable import Sequence
 
 from esgpull.downloader.as_globus import GlobusDownloadTask, GlobusTaskStartInfo
 from esgpull.downloader.as_https import HttpsDownloadTask
@@ -74,6 +73,8 @@ def make_globus_tasks(
 
 def _make_globus_on_start(app: 'Esgpull'):
     def on_start(start_info: GlobusTaskStartInfo) -> None:
+        # FIXME handle case where a task starts but not task ID set yet
+
         transfer = GlobusTransfer(
             task_id=start_info.globus_task_id,
             status=GlobusTransferStatus.ACTIVE,

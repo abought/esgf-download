@@ -87,6 +87,7 @@ class HttpsDownloadTask(DownloadTask):
         files_completed = len(skip)
         bytes_completed = sum(fr.file.size for fr in skip)
 
+        client_ctx: contextlib.AbstractAsyncContextManager[httpx.AsyncClient]
         if self._client is not None:
             client_ctx = contextlib.nullcontext(self._client)
         else:

@@ -34,8 +34,8 @@ class TaskResult:
 
     msg: str
 
-    start_time: datetime
-    end_time: datetime = dataclasses.field(default_factory=lambda: datetime.now(timezone.utc))
+    start_time: Optional[datetime]
+    end_time: Optional[datetime] = dataclasses.field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclasses.dataclass
@@ -45,7 +45,7 @@ class TaskStartInfo:
     """
     task_label: str
 
-    started_at: datetime
+    started_at: Optional[datetime]  # only None if the task failed while in queue
     files: list[File]
     already_done: list[FileResult]  # files that are considered complete and will  be skipped
 

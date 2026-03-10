@@ -107,7 +107,6 @@ class file:
         return sa.select(File).where(File.status.in_(status))
 
     @staticmethod
-    @functools.cache
     def ready_for_download() -> sa.Select[tuple[File]]:
         """
         Select files that are eligible to download or retry.
@@ -207,6 +206,19 @@ class dataset:
             sa.func.count(sa.case((File.status == FileStatus.Done, 1)))
             == dataset.total_files
         ).where(File.dataset_id == dataset.dataset_id)
+
+
+class globus_transfer:
+    @staticmethod
+    @functools.cache
+    def pending() -> sa.Select[tuple[GlobusTransfer]]:
+        """Select GlobusTransfer records that have not yet reached a terminal state."""
+        return sa.select(GlobusTransfer).where(
+            GlobusTransfer.status.in_([
+                GlobusTransferStatus.ACTIVE,
+                GlobusTransferStatus.INACTIVE,
+            ])
+        )
 
 
 class query:

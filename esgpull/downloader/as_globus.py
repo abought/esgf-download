@@ -6,12 +6,11 @@ from typing import Optional, TYPE_CHECKING
 
 from globus_sdk import TransferData, GlobusHTTPResponse
 
-from esgpull.models import GlobusTransferStatus
+from esgpull.models import File, GlobusTransferStatus
 
 if TYPE_CHECKING:
     from globus_sdk import TransferClient
 
-from esgpull import File
 from esgpull.downloader.base import (
     DownloadTask,
     FileResult,
@@ -25,7 +24,7 @@ from esgpull.tui import logger
 
 @dataclasses.dataclass
 class GlobusTaskStartInfo(TaskStartInfo):
-    globus_task_id: str
+    globus_task_id: Optional[str]
 
 
 @dataclasses.dataclass
@@ -35,7 +34,7 @@ class GlobusTaskHeartbeat(TaskHeartbeat):
 
 @dataclasses.dataclass
 class GlobusTaskResult(TaskResult):
-    globus_task_id: str = dataclasses.field(kw_only=True)
+    globus_task_id: Optional[str] = dataclasses.field(kw_only=True)
     globus_task_status: GlobusTransferStatus = dataclasses.field(kw_only=True)
 
 
@@ -51,46 +50,67 @@ class _GlobusTransferStatus(enum.Enum):
 
 class GlobusDownloadTask(DownloadTask):
     """
-    Transfer a batch of files to a globus endpoint.
+    Transfer a batch of files to a Globus endpoint, or poll an existing transfer.
+
+    Use the default constructor to submit a new transfer; use from_existing() to
+    check the state of a transfer that was submitted in a prior run.
     """
     def __init__(
             self,
-            task_label,
-            files,
-            client: TransferClient,
+            task_label: str,
+            files: 'list[File]',
+            client: 'TransferClient',
 
-            # Typically set in esgpull config
-            dest_collection_id: str,
-            dest_root_path: str,
-
-            # All files in this batch must be in same source collection.
-            # Required when submitting a new transfer; may be omitted when
-            # transfer_id is provided (re-poll mode) since it is unused then.
+            # Required for new transfers; unused (and may be None) in re-poll mode.
             source_collection_id: Optional[str] = None,
+            dest_collection_id: Optional[str] = None,
+            dest_root_path: Optional[str] = None,
 
-            # This is used to check an existing task in progress
             transfer_id: Optional[str] = None,
 
-            poll_time: int = 60 * 1,
+            poll_time: int = 60,
             wait_until_resolved: bool = True,
     ) -> None:
-        if source_collection_id is None and transfer_id is None:
-            raise ValueError(
-                "Either source_collection_id or transfer_id must be provided"
-            )
+        if transfer_id is None:
+            if source_collection_id is None or dest_collection_id is None or dest_root_path is None:
+                raise ValueError(
+                    "source_collection_id, dest_collection_id, and dest_root_path "
+                    "are required when submitting a new transfer"
+                )
 
         super().__init__(task_label, files)
 
         self._client = client
         self._source_collection_id = source_collection_id
-
         self._dest_collection_id = dest_collection_id
         self._dest_root_path = dest_root_path
-
-        # For long transfers, default poll time will increase up to a system-provided max
         self._poll_time = poll_time
         self._wait_until_resolved = wait_until_resolved
         self._transfer_id = transfer_id
+
+    @classmethod
+    def from_existing(
+            cls,
+            task_label: str,
+            files: 'list[File]',
+            client: 'TransferClient',
+            transfer_id: str,
+            poll_time: int = 60,
+            wait_until_resolved: bool = False,
+    ) -> 'GlobusDownloadTask':
+        """
+        Check the state of a Globus transfer submitted in a prior run.
+        Destination collection config is not needed since the transfer already
+        exists on the Globus service.
+        """
+        return cls(
+            task_label=task_label,
+            files=files,
+            client=client,
+            transfer_id=transfer_id,
+            poll_time=poll_time,
+            wait_until_resolved=wait_until_resolved,
+        )
 
     def to_cancel(self) -> GlobusTaskResult:
         if self._transfer_id is not None:
@@ -131,6 +151,7 @@ class GlobusDownloadTask(DownloadTask):
 
     ########## Internal helpers
     def _emit_heartbeat(self, n_files_completed: int, bytes_completed: int) -> None:
+        assert self._transfer_id
         event = GlobusTaskHeartbeat(
             self._task_label,
             n_files_completed,
@@ -142,7 +163,11 @@ class GlobusDownloadTask(DownloadTask):
         for callback in self._heartbeat_callbacks:
             callback(event)
 
-    def _make_transfer_data(self, files: list[File]) -> TransferData:
+    def _make_transfer_data(self, files: 'list[File]') -> TransferData:
+        assert self._source_collection_id is not None
+        assert self._dest_collection_id is not None
+        assert self._dest_root_path is not None
+
         td = TransferData(
             self._source_collection_id,
             self._dest_collection_id,
@@ -167,9 +192,8 @@ class GlobusDownloadTask(DownloadTask):
             skip_resp = self._client.paginated.task_skipped_errors(self._transfer_id)
             skipped_paths = {f['source_path'] for f in skip_resp.items()}
             results = [
-                FileResult(FileStatus.Done if path not in skipped_paths else FileStatus.Error, f)
+                FileResult(FileStatus.Done if f.globus_fn not in skipped_paths else FileStatus.Error, f)
                 for f in self._files
-                for path in (f.globus_path,)
             ]
         else:
             # If it wasn't skipped due to an error, then assume it was successfully transferred
@@ -186,7 +210,7 @@ class GlobusDownloadTask(DownloadTask):
 
 
     ######## ABC implementation
-    async def _pre_check(self, files: list[File]) -> tuple[list[File], list[FileResult]]:
+    async def _pre_check(self, files: 'list[File]') -> 'tuple[list[File], list[FileResult]]':
         """The globus transfer result will automatically handle skip logic and missing files."""
         return files, []
 
@@ -217,6 +241,7 @@ class GlobusDownloadTask(DownloadTask):
 
     async def _run(self, items: list[File], skip: list[FileResult]) -> TaskResult:
         if self._transfer_id is None:
+            # FIXME: start event emitted before run, so task_id never included in start evenbt!!
             td = self._make_transfer_data(items)
             resp = self._client.submit_transfer(td)
             self._transfer_id = resp.data['task_id']
