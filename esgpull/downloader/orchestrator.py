@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import AsyncGenerator
 
-from esgpull.downloader.base import DownloadTask, TaskResult, StartCallback, HeartbeatCallback
+from esgpull.downloader.base import DownloadTask, TaskResultEvent, StartCallback, HeartbeatCallback
 
 
 class Orchestrator:
@@ -20,7 +20,7 @@ class Orchestrator:
     ):
         self._local_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
         self._remote_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
-        self._task_results: asyncio.Queue[TaskResult] = asyncio.Queue()
+        self._task_results: asyncio.Queue[TaskResultEvent] = asyncio.Queue()
 
         self._max_concurrent_local = max_concurrent_local
         self._max_concurrent_remote = max_concurrent_remote
@@ -84,7 +84,7 @@ class Orchestrator:
         if cb not in self._start_callbacks:
             self._start_callbacks.append(cb)
 
-    async def iter_results(self) -> AsyncGenerator[TaskResult, None]:
+    async def iter_results(self) -> AsyncGenerator[TaskResultEvent, None]:
         """
         Run tasks asynchronously and report results as available.=
 
@@ -114,7 +114,7 @@ class Orchestrator:
             for w in self._workers:
                 w.cancel()
 
-    async def collect_cancels(self) -> list[TaskResult]:
+    async def collect_cancels(self) -> list[TaskResultEvent]:
         """
         Ensures that canceled tasks report a valid result. MUST be called manually.
 
@@ -126,7 +126,7 @@ class Orchestrator:
         if self._workers:
             await asyncio.gather(*self._workers, return_exceptions=True)
 
-        results: list[TaskResult] = []
+        results: list[TaskResultEvent] = []
         while not self._task_results.empty():
             results.append(self._task_results.get_nowait())
         for queue in (self._local_queue, self._remote_queue):

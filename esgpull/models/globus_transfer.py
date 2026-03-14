@@ -23,6 +23,14 @@ class GlobusTransferStatus(Enum):
     FAILED = "FAILED"
     SUCCEEDED = "SUCCEEDED"
 
+    @classmethod
+    def resolved(cls):
+        return {cls.FAILED, cls.SUCCEEDED}
+
+    @classmethod
+    def running(cls):
+        return {cls.ACTIVE, cls.INACTIVE}
+
 
 class GlobusTransfer(BaseNoSHA):
     """

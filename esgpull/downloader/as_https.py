@@ -14,7 +14,7 @@ from httpx import AsyncClient
 from esgpull.downloader.base import (
     DownloadTask,
     FileResult,
-    TaskResult,
+    TaskResultEvent, TaskStatus,
 )
 from esgpull.models.file import FileStatus
 from esgpull.downloader.fs import Digest, Filesystem
@@ -64,12 +64,13 @@ class HttpsDownloadTask(DownloadTask):
         self._http_timeout = http_timeout
         self._client = client
 
-    def to_cancel(self) -> TaskResult:
+    def to_cancel(self) -> TaskResultEvent:
         """When a local download is interrupted, mark file as eligible for retry later"""
         files = self._to_download or self._files
-        return self.to_result(
+        return self._make_result(
+            TaskStatus.CANCELED,
             'Download cancelled',
-            [FileResult(FileStatus.Cancelled, f) for f in files],
+            [FileResult(FileStatus.Cancelled, f) for f in files]
         )
 
     async def _pre_check(self, files: list[File]) -> tuple[list[File], list[FileResult]]:
@@ -82,7 +83,7 @@ class HttpsDownloadTask(DownloadTask):
                 to_download.append(file)
         return to_download, already_done
 
-    async def _run(self, to_download: list[File], skip: list[FileResult]) -> TaskResult:
+    async def _run(self, to_download: list[File], skip: list[FileResult]) -> TaskResultEvent:
         results: list[FileResult] = []
         files_completed = len(skip)
         bytes_completed = sum(fr.file.size for fr in skip)
@@ -113,12 +114,10 @@ class HttpsDownloadTask(DownloadTask):
                                 bytes_completed += len(chunk)
                                 self._emit_heartbeat(files_completed, bytes_completed)
 
-
                     file_path.tmp.rename(file_path.done)
 
                     if digest is None or digest.hexdigest() == file.checksum:
                         status = FileStatus.Done
-
                 except:
                     # Log exception; external caller just sees the task marked as failed
                     logger.exception(f"Download failed for file {file.file_id} in task {self._task_label}")
@@ -129,9 +128,9 @@ class HttpsDownloadTask(DownloadTask):
                 files_completed += 1
                 self._emit_heartbeat(files_completed, bytes_completed)
 
-        return self.to_result('Download complete', results)
+        return self._make_result(TaskStatus.SUCCESS, 'Download complete', results)
 
-    async def _cleanup(self, result: TaskResult) -> TaskResult:
+    async def _cleanup(self, result: TaskResultEvent) -> TaskResultEvent:
         """
         Move successfully downloaded files to their final DRS path.
         Delete any .done or .part temp files left behind by failures.
