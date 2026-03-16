@@ -84,6 +84,16 @@ class Download(BaseModel, validate_assignment=True):
     disable_checksum: bool = False
     show_filename: bool = False
 
+    prefer_globus: bool = False  # Prefer globus transfer use if available
+    poll_globus: bool = True  # Keep esgpull running until globus transfer done
+    poll_globus_time_max: int = 60 * 10  # Will start at 60 sec, and gradually increase delay to this max
+
+    @field_validator("poll_globus_time_max", mode='after')
+    @classmethod
+    def poll_time_ok(cls, value: int) -> int:
+        if value < 60:
+            raise ValueError('Globus poll time too short. Must be >= 60 seconds')
+        return value
 
 class DefaultOptions(BaseModel, validate_assignment=True):
     distrib: str = Options._distrib_.name
@@ -114,10 +124,6 @@ class Globus(BaseModel, validate_assignment=True):
     """
     Options for using the Globus transfer feature
     """
-
-    # Not every ESGF item will support a globus download source, but use globus transfers whenever possible.
-    prefer_globus_download: bool = False
-
     # At present, this only allows service client credentials, which are a separate identity authorized to access a
     #  storage collection. User credentials are not yet supported.
     client_id: str = ""
@@ -126,16 +132,6 @@ class Globus(BaseModel, validate_assignment=True):
     # Each workspace allows exactly one destination collection and root folder
     destination_collection_uuid: str = ""
     destination_collection_root: str = ""
-
-    @model_validator(mode="after")
-    def has_globus_options(self):
-        if self.prefer_globus_download and not (self.client_id and self.client_secret):
-            raise ValueError("If using Globus download, must provide a valid Globus `client_id` and `client_secret`")
-
-        if self.prefer_globus_download and not self.destination_collection_uuid:
-            raise ValueError("If using Globus download, must specify `destination_collection_uuid`")
-
-        return self
 
 
 class API(BaseModel, validate_assignment=True):
@@ -423,3 +419,14 @@ class Config(BaseSettings):
         self._config_file.parent.mkdir(parents=True, exist_ok=True)
         with self._config_file.open("w") as f:
             tomlkit.dump(self._raw, f)
+
+
+    @model_validator(mode="after")
+    def has_globus_options(self):
+        if self.download.prefer_globus and not (self.globus.client_id and self.globus.client_secret):
+            raise ValueError("If using Globus download, must provide a valid Globus `client_id` and `client_secret`")
+
+        if self.download.prefer_globus and not self.globus.destination_collection_uuid:
+            raise ValueError("If using Globus download, must specify `destination_collection_uuid`")
+
+        return self
