@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import ABC
 import asyncio
 from pathlib import Path
@@ -75,12 +77,13 @@ class GlobusStatusTask(GlobusTaskCommon):
         transfer_task_id: str,  # the task ID from the globus transfer api
 
         wait_until_resolved: bool = True,
-        poll_time: int = 60
+        poll_time_max: int = 60 * 100
     ):
         super().__init__(task_label, files, client)
         self._transfer_task_id = transfer_task_id
         self._wait_until_resolved = wait_until_resolved
-        self._poll_time = poll_time
+        self._poll_time = 60  # Hardcoded minimum, gradually increases to configured max
+        self._poll_time_max = poll_time_max
 
     ### Overrides
     def _emit_start(self, *args, **kwargs) -> None:
@@ -103,15 +106,13 @@ class GlobusStatusTask(GlobusTaskCommon):
         return status, has_skipped
 
     async def _poll_for_completion(self) -> tuple[GlobusTransferStatus, bool]:
-        MAX_POLL_TIME = 60 * 10
-
         while True:
             status, has_skipped = await self._check_transfer_status()
             if status in GlobusTransferStatus.resolved():
                 return status, has_skipped
 
-            if self._poll_time < MAX_POLL_TIME:
-                self._poll_time = max(self._poll_time + 15, MAX_POLL_TIME)
+            if self._poll_time < self._poll_time_max:
+                self._poll_time = min(self._poll_time + 15, self._poll_time_max)
             await asyncio.sleep(self._poll_time)
 
     async def _check_skipped_errors(self) -> set[str]:
@@ -196,18 +197,17 @@ class GlobusTransferTask(GlobusTaskCommon):
         return td
 
     ######## ABC implementation
-    async def _run(self, items: list[File], skip: list[FileResult]) -> TaskResultEvent:
-        td = self._make_transfer_data(items)
+    async def _setup(self, to_download: list[File]):
+        """
+        Must submit transfer in setup step so that the globus task ID can be emitted in start event"""
+        td = self._make_transfer_data(to_download)
 
-        try:
-            resp = self._client.submit_transfer(td)
-        except GlobusAPIError:
-            msg = "The globus API did not accept the transfer task"
-            logger.exception(msg)
-            return self.to_fail()
-
+        resp = self._client.submit_transfer(td)
         self._transfer_task_id = resp.data['task_id']
 
+
+    async def _run(self, items: list[File], skip: list[FileResult]) -> TaskResultEvent:
+        assert self._transfer_task_id is not None
         if not self._wait_until_resolved:
             return self._make_result(
                 TaskStatus.ACTIVE,

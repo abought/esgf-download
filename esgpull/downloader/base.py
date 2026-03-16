@@ -187,6 +187,13 @@ class DownloadTask(ABC):
         """
         raise NotImplementedError
 
+    async def _setup(self, to_download: list[File]):
+        """
+        Allow operations to occur before the start event is sent
+        These operations can have side effects, like setting data fields on the instance
+        """
+        pass
+
     @abstractmethod
     async def _run(self, to_download: list[File], skip: list[FileResult]) -> TaskResultEvent:
         """
@@ -249,6 +256,7 @@ class DownloadTask(ABC):
         to_download, skip = await self._pre_check(self._files)
         self._to_download = to_download
 
+        await self._setup(to_download)  # side-effecty prepare any info needed for start event
         self._emit_start(to_download, skip)
 
         try:
