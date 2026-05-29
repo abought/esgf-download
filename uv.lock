@@ -593,6 +593,7 @@ dependencies = [
     { name = "cattrs" },
     { name = "click" },
     { name = "click-params" },
+    { name = "globus-sdk" },
     { name = "httpx" },
     { name = "nest-asyncio" },
     { name = "packaging" },
@@ -630,6 +631,7 @@ requires-dist = [
     { name = "cattrs", specifier = ">=22.2.0" },
     { name = "click", specifier = ">=8.1.3" },
     { name = "click-params", specifier = ">=0.4.0" },
+    { name = "globus-sdk", specifier = ">=4.4.0" },
     { name = "httpx", specifier = ">=0.23.0" },
     { name = "nest-asyncio", specifier = ">=1.5.6" },
     { name = "packaging", specifier = ">=25.0" },
@@ -707,6 +709,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d9/29/d40217cbe2f6b1359e00c6c307bb3fc876ba74068cbab3dde77f03ca0dc4/ghp-import-2.1.0.tar.gz", hash = "sha256:9c535c4c61193c2df8871222567d7fd7e5014d835f97dc7b7439069e2413d343", size = 10943, upload-time = "2022-05-02T15:47:16.11Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/ec/67fbef5d497f86283db54c22eec6f6140243aae73265799baaaa19cd17fb/ghp_import-2.1.0-py3-none-any.whl", hash = "sha256:8337dd7b50877f163d4c0289bc1f1c7f127550241988d568c1db512c4324a619", size = 11034, upload-time = "2022-05-02T15:47:14.552Z" },
+]
+
+[[package]]
+name = "globus-sdk"
+version = "4.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "requests" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a5/b2/c05a7042344ebbf9f85df259374e08a0deb5437a6a816e92976f5612c122/globus_sdk-4.7.0.tar.gz", hash = "sha256:69c27e1e5035f732d29dcdb9983ed282e5bf9c9c75691399b7d51ce3aea94504", size = 281838, upload-time = "2026-05-20T16:20:29.992Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/f0/67d4b279d5a19324792e29499856160d3a478e864cfec3919d23ebc88268/globus_sdk-4.7.0-py3-none-any.whl", hash = "sha256:6f2a15cff130c93ca70ddc25a8156ae636865850d9a9c9dbb7ffc365e70930e2", size = 439273, upload-time = "2026-05-20T16:20:27.683Z" },
 ]
 
 [[package]]
@@ -1619,6 +1636,23 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b0/77/a5b8c569bf593b0140bde72ea885a803b82086995367bf2037de0159d924/pygments-2.19.2.tar.gz", hash = "sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887", size = 4968631, upload-time = "2025-06-21T13:39:12.283Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/21/705964c7812476f378728bdf590ca4b771ec72385c533964653c68e86bdc/pygments-2.19.2-py3-none-any.whl", hash = "sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b", size = 1225217, upload-time = "2025-06-21T13:39:07.939Z" },
+]
+
+[[package]]
+name = "pyjwt"
+version = "2.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423", size = 107515, upload-time = "2026-05-21T19:54:36.618Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
+]
+
+[package.optional-dependencies]
+crypto = [
+    { name = "cryptography" },
 ]
 
 [[package]]
