@@ -30,9 +30,9 @@ from rich.progress import (
 from esgpull.config import Config
 from esgpull.context import Context
 from esgpull.database import Database
-from esgpull.downloader.as_globus import GlobusDownloadTask, GlobusTaskResult
+from esgpull.downloader.as_globus import GlobusTransferTask, GlobusStatusTask
 from esgpull.downloader.as_https import DownloadCtx
-from esgpull.downloader.base import FileResult, TaskResult, TaskStartInfo
+from esgpull.downloader.base import FileResult, TaskResultEvent, TaskStartEvent
 from esgpull.downloader.factory import partition_by_transfer_method, make_https_tasks, make_globus_tasks
 from esgpull.downloader.orchestrator import Orchestrator
 from esgpull.exceptions import (
@@ -545,27 +545,34 @@ class Esgpull:
                 )
                 continue
 
-            task = GlobusDownloadTask.from_existing(
+            task = GlobusStatusTask(
                 task_label=transfer.task_id,
                 files=files,
                 client=transfer_client,
-                transfer_id=transfer.task_id,
+                transfer_task_id=transfer.task_id,
+                wait_until_resolved=False
             )
+
+
             orchestrator.add_remote_task(task)
             transfer_by_task_id[transfer.task_id] = transfer
 
         is_complete = {GlobusTransferStatus.SUCCEEDED, GlobusTransferStatus.FAILED}
 
         async for result in orchestrator.iter_results():
-            assert isinstance(result, GlobusTaskResult)
-            assert result.globus_task_id is not None # check existing transfer method will always have a task ID
+            tid = result.extra.get('globus_task_id')
+            ts = result.extra.get('globus_task_status')
 
-            transfer = transfer_by_task_id[result.globus_task_id]
+            assert isinstance(tid, str)  # generic status class with type-specific extra fields
+            assert isinstance(ts, GlobusTransferStatus)
+
+            transfer = transfer_by_task_id[tid]
+
             if transfer:
-                transfer.status = result.globus_task_status
+                transfer.status = ts
                 transfer.last_updated = datetime.now(timezone.utc)
 
-            if result.globus_task_status in is_complete:
+            if ts in is_complete:
                 # If task is complete, update status info for all associated files
                 transfer.completion_time = result.end_time
                 self.db.add(transfer)
@@ -620,7 +627,7 @@ class Esgpull:
             max_concurrent_local=self.config.download.max_concurrent,
         )
 
-        def _on_task_start(start_info: TaskStartInfo) -> None:
+        def _on_task_start(start_info: TaskStartEvent) -> None:
             # Transition files that will actually be downloaded to Started,
             # meaning the task has been dequeued and begun executing.
             # already_done files (found at DRS path during pre_check) are left
@@ -659,22 +666,23 @@ class Esgpull:
         _BATCH_SIZE = 50
         pending: list[File | GlobusTransfer] = []
 
-        def _process_result(result: TaskResult) -> None:
+        def _process_result(result: TaskResultEvent) -> None:
             for fr in result.files:
                 fr.file.status = fr.status
                 pending.append(fr.file)
+            # FIXME: refactor this part to a separate globus task callback
             # For Globus tasks: update the GlobusTransfer record created at start.
             # NOTE: result.end_time is set when the TaskResult dataclass is
             # instantiated (after polling completes), not from the Globus API's
             # own completion_time field. A more accurate value would require
             # surfacing the API's completion_time through GlobusTaskResult.
-            if isinstance(result, GlobusTaskResult):
-                transfer = self.db.session.get(GlobusTransfer, result.globus_task_id)
-                if transfer is not None:
-                    transfer.status = result.globus_task_status
-                    transfer.last_updated = datetime.now(timezone.utc)
-                    transfer.completion_time = result.end_time
-                    pending.append(transfer)
+            # if isinstance(result, GlobusTaskResult):
+            #     transfer = self.db.session.get(GlobusTransfer, result.globus_task_id)
+            #     if transfer is not None:
+            #         transfer.status = result.globus_task_status
+            #         transfer.last_updated = datetime.now(timezone.utc)
+            #         transfer.completion_time = result.end_time
+            #         pending.append(transfer)
 
         try:
             async for result in orchestrator.iter_results():

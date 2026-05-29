@@ -4,7 +4,7 @@ Factory functions for creating download tasks from a list of files.
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from esgpull.downloader.as_globus import GlobusDownloadTask, GlobusTaskStartInfo
+from esgpull.downloader.as_globus import GlobusTransferTask
 from esgpull.downloader.as_https import HttpsDownloadTask
 from esgpull.models import File
 from esgpull.models.globus_transfer import GlobusTransfer, GlobusTransferStatus
@@ -51,14 +51,14 @@ def make_globus_tasks(
     globus_files: dict[str, list[File]],
     app: 'Esgpull',
     transfer_client: 'TransferClient',
-) -> list[GlobusDownloadTask]:
+) -> list[GlobusTransferTask]:
     """
-    Create one GlobusDownloadTask per source collection, with an on_start callback
+    Create one GlobusTransferTask per source collection, with an on_start callback
     that persists a GlobusTransfer record (and associated files) to the database.
     """
     tasks = []
     for origin_id, batch in globus_files.items():
-        task = GlobusDownloadTask(
+        task = GlobusTransferTask(
             task_label=origin_id,
             files=batch,
             client=transfer_client,
@@ -72,11 +72,14 @@ def make_globus_tasks(
 
 
 def _make_globus_on_start(app: 'Esgpull'):
-    def on_start(start_info: GlobusTaskStartInfo) -> None:
+    from esgpull.downloader.base import TaskStartEvent
+
+    def on_start(start_info: TaskStartEvent) -> None:
         # FIXME handle case where a task starts but not task ID set yet
+        task_id = start_info.extra['globus_task_id']
 
         transfer = GlobusTransfer(
-            task_id=start_info.globus_task_id,
+            task_id=task_id,
             status=GlobusTransferStatus.ACTIVE,
         )
         transfer.files = list(start_info.files)
