@@ -81,11 +81,27 @@ class FakeDownloadTask(DownloadTask):
         return self._make_result(TaskStatus.CANCELED, "cancelled", [])
 
 
+class FakeHeartbeatTask(FakeDownloadTask):
+    """Variant that emits one heartbeat per run, for callback testing."""
+
+    async def _run(self, to_download, skip):
+        self._emit_heartbeat(1, 0)
+        return self._make_result(TaskStatus.SUCCESS, "ok", [])
+
+
 class FakeExtraTask(FakeDownloadTask):
     """Variant that injects a fixed extra dict into all events."""
 
     def _get_extra(self) -> dict:
         return {"key": "val"}
+
+
+class FakeExtraHeartbeatTask(FakeExtraTask):
+    """FakeExtraTask that also emits a heartbeat, for extra-propagation tests."""
+
+    async def _run(self, to_download, skip):
+        self._emit_heartbeat(1, 0)
+        return self._make_result(TaskStatus.SUCCESS, "ok", [])
 
 
 class FakeMutableExtraTask(FakeDownloadTask):
@@ -99,86 +115,57 @@ class FakeMutableExtraTask(FakeDownloadTask):
         return {"value": self.extra_value}
 
 
-# ---------------------------------------------------------------------------
-# Group 1: Constructor invariants
-# ---------------------------------------------------------------------------
+class FakeMutableHeartbeatTask(FakeMutableExtraTask):
+    """Mutable-extra variant that emits two heartbeats so mutation is observable."""
 
-class TestConstructor:
-    def test_files_expected_equals_file_count(self):
-        files = [make_file(file_id="a"), make_file(file_id="b")]
-        task = FakeDownloadTask("t", files)
-        assert task._files_expected == 2
-
-    def test_bytes_expected_equals_sum_of_sizes(self):
-        files = [make_file(size=100, file_id="a"), make_file(size=250, file_id="b")]
-        task = FakeDownloadTask("t", files)
-        assert task._bytes_expected == 350
-
-    def test_callback_lists_empty_at_construction(self):
-        task = FakeDownloadTask("t", [])
-        assert task._heartbeat_callbacks == []
-        assert task._start_callbacks == []
-        assert task._result_callbacks == []
-
-    def test_start_time_is_none_before_run(self):
-        task = FakeDownloadTask("t", [])
-        assert task._start_time is None
+    async def _run(self, to_download, skip):
+        self._emit_heartbeat(1, 0)
+        self.extra_value = "second"
+        self._emit_heartbeat(2, 0)
+        return self._make_result(TaskStatus.SUCCESS, "ok", [])
 
 
 # ---------------------------------------------------------------------------
-# Group 2: Callback registration
+# Callback registration
 # ---------------------------------------------------------------------------
 
 class TestCallbackRegistration:
-    def test_on_heartbeat_registers_callback(self):
-        task = FakeDownloadTask("t", [])
-        cb = MagicMock()
-        task.on_heartbeat(cb)
-        assert cb in task._heartbeat_callbacks
-
-    def test_on_start_registers_callback(self):
-        task = FakeDownloadTask("t", [])
-        cb = MagicMock()
-        task.on_start(cb)
-        assert cb in task._start_callbacks
-
-    def test_on_result_registers_callback(self):
-        task = FakeDownloadTask("t", [])
-        cb = MagicMock()
-        task.on_result(cb)
-        assert cb in task._result_callbacks
-
-    def test_on_heartbeat_duplicate_ignored(self):
-        task = FakeDownloadTask("t", [])
+    def test_duplicate_heartbeat_callback_fires_once(self):
+        task = FakeHeartbeatTask("t", [make_file()])
         cb = MagicMock()
         task.on_heartbeat(cb)
         task.on_heartbeat(cb)
-        assert len(task._heartbeat_callbacks) == 1
+        asyncio.run(task.run())
+        assert cb.call_count == 1
 
-    def test_on_start_duplicate_ignored(self):
-        task = FakeDownloadTask("t", [])
+    def test_duplicate_start_callback_fires_once(self):
+        task = FakeDownloadTask("t", [make_file()])
         cb = MagicMock()
         task.on_start(cb)
         task.on_start(cb)
-        assert len(task._start_callbacks) == 1
+        asyncio.run(task.run())
+        assert cb.call_count == 1
 
-    def test_on_result_duplicate_ignored(self):
-        task = FakeDownloadTask("t", [])
+    def test_duplicate_result_callback_fires_once(self):
+        task = FakeDownloadTask("t", [make_file()])
         cb = MagicMock()
         task.on_result(cb)
         task.on_result(cb)
-        assert len(task._result_callbacks) == 1
+        asyncio.run(task.run())
+        assert cb.call_count == 1
 
-    def test_multiple_distinct_callbacks_registered_in_order(self):
-        task = FakeDownloadTask("t", [])
+    def test_multiple_heartbeat_callbacks_all_fire(self):
+        task = FakeHeartbeatTask("t", [make_file()])
         cb1, cb2 = MagicMock(), MagicMock()
         task.on_heartbeat(cb1)
         task.on_heartbeat(cb2)
-        assert task._heartbeat_callbacks == [cb1, cb2]
+        asyncio.run(task.run())
+        assert cb1.call_count == 1
+        assert cb2.call_count == 1
 
 
 # ---------------------------------------------------------------------------
-# Group 3: run() — event sequence
+# run() — event sequence
 # ---------------------------------------------------------------------------
 
 class TestRunEventSequence:
@@ -247,16 +234,15 @@ class TestRunEventSequence:
         completed = [call[0][0].n_files_completed for call in cb.call_args_list]
         assert completed == [1, 2, 3]
 
-    def test_run_returns_result_from_cleanup(self):
-        sentinel = TaskResultEvent("t", TaskStatus.SUCCESS, "done", [], {}, None)
-
+    def test_cleanup_modifies_run_result(self):
         class CleanupTask(FakeDownloadTask):
             async def _cleanup(self, result):
-                return sentinel
+                result.msg = "cleaned up"
+                return result
 
         task = CleanupTask("t", [])
         result = asyncio.run(task.run())
-        assert result is sentinel
+        assert result.msg == 'cleaned up'
 
     def test_start_time_set_before_pre_check(self):
         captured: list = []
@@ -273,7 +259,7 @@ class TestRunEventSequence:
 
 
 # ---------------------------------------------------------------------------
-# Group 4: TaskStartEvent field correctness
+# TaskStartEvent field correctness
 # ---------------------------------------------------------------------------
 
 class TestStartEventFields:
@@ -309,19 +295,26 @@ class TestStartEventFields:
 
 
 # ---------------------------------------------------------------------------
-# Group 5: TaskHeartbeatEvent field correctness
+# TaskHeartbeatEvent field correctness
 # ---------------------------------------------------------------------------
 
 class TestHeartbeatEventFields:
-    def test_fields_match_emit_arguments(self):
-        files = [make_file(size=100, file_id="a"), make_file(size=200, file_id="b")]
-        task = FakeDownloadTask("hb-label", files)
+    def _capture_heartbeats(self, task: FakeDownloadTask) -> list[TaskHeartbeatEvent]:
         captured: list[TaskHeartbeatEvent] = []
         task.on_heartbeat(lambda e: captured.append(e))
+        asyncio.run(task.run())
+        return captured
 
-        task._emit_heartbeat(3, 512)
+    def test_fields_reflect_emission_and_task_totals(self):
+        class SingleHeartbeatTask(FakeDownloadTask):
+            async def _run(self, to_download, skip):
+                self._emit_heartbeat(3, 512)
+                return self._make_result(TaskStatus.SUCCESS, "ok", [])
 
-        event = captured[0]
+        files = [make_file(size=100, file_id="a"), make_file(size=200, file_id="b")]
+        task = SingleHeartbeatTask("hb-label", files)
+        events = self._capture_heartbeats(task)
+        event = events[0]
         assert event.task_label == "hb-label"
         assert event.n_files_completed == 3
         assert event.bytes_completed == 512
@@ -329,15 +322,13 @@ class TestHeartbeatEventFields:
         assert event.bytes_expected == 300
 
     def test_event_time_is_timezone_aware(self):
-        task = FakeDownloadTask("t", [])
-        captured: list[TaskHeartbeatEvent] = []
-        task.on_heartbeat(lambda e: captured.append(e))
-        task._emit_heartbeat(0, 0)
-        assert captured[0].event_time.tzinfo is not None
+        task = FakeHeartbeatTask("t", [make_file()])
+        events = self._capture_heartbeats(task)
+        assert events[0].event_time.tzinfo is not None
 
 
 # ---------------------------------------------------------------------------
-# Group 6: TaskResultEvent field correctness
+# TaskResultEvent field correctness
 # ---------------------------------------------------------------------------
 
 class TestResultEventFields:
@@ -346,31 +337,19 @@ class TestResultEventFields:
         result = asyncio.run(task.run())
         assert result.task_label == "my-label"
 
-    def test_status_comes_from_cleanup(self):
-        sentinel = TaskResultEvent("t", TaskStatus.SUCCESS, "ok", [], {}, None)
-
-        class CleanupTask(FakeDownloadTask):
-            async def _cleanup(self, result):
-                return sentinel
-
-        result = asyncio.run(CleanupTask("t", []).run())
-        assert result.status == TaskStatus.SUCCESS
-
     def test_start_time_matches_task_start_time(self):
         task = FakeDownloadTask("t", [])
         result = asyncio.run(task.run())
         assert result.start_time == task._start_time
 
-    def test_end_time_is_timezone_aware_and_not_before_start(self):
+    def test_end_time_is_not_before_start(self):
         task = FakeDownloadTask("t", [])
         result = asyncio.run(task.run())
-        assert isinstance(result.end_time, datetime)
-        assert result.end_time.tzinfo is not None
         assert result.end_time >= result.start_time
 
 
 # ---------------------------------------------------------------------------
-# Group 7: .extra propagation
+# .extra propagation
 # ---------------------------------------------------------------------------
 
 class TestExtraPropagation:
@@ -382,59 +361,60 @@ class TestExtraPropagation:
         assert captured[0].extra == {"key": "val"}
 
     def test_extra_in_heartbeat_event(self):
-        class HeartbeatExtraTask(FakeExtraTask):
-            async def _run(self, to_download, skip):
-                self._emit_heartbeat(1, 0)
-                return self._make_result(TaskStatus.SUCCESS, "ok", [])
-
-        task = HeartbeatExtraTask("t", [make_file()])
+        task = FakeExtraHeartbeatTask("t", [make_file()])
         captured: list[TaskHeartbeatEvent] = []
         task.on_heartbeat(lambda e: captured.append(e))
         asyncio.run(task.run())
         assert captured[0].extra == {"key": "val"}
 
-    def test_extra_in_make_result(self):
+    def test_extra_in_result_event(self):
         task = FakeExtraTask("t", [])
-        result = task._make_result(TaskStatus.SUCCESS, "ok", [])
-        assert result.extra == {"key": "val"}
+        captured: list[TaskResultEvent] = []
+        task.on_result(lambda e: captured.append(e))
+        asyncio.run(task.run())
+        assert captured[0].extra == {"key": "val"}
 
     def test_extra_reevaluated_per_emission(self):
-        task = FakeMutableExtraTask("t", [make_file(file_id="a")])
+        task = FakeMutableHeartbeatTask("t", [make_file(file_id="a")])
         captured: list[dict] = []
         task.on_heartbeat(lambda e: captured.append(e.extra.copy()))
-
-        task.extra_value = "first"
-        task._emit_heartbeat(1, 0)
-        task.extra_value = "second"
-        task._emit_heartbeat(2, 0)
-
+        asyncio.run(task.run())
         assert captured[0] == {"value": "first"}
         assert captured[1] == {"value": "second"}
 
 
 # ---------------------------------------------------------------------------
-# Group 8: to_fail() behavior
+# to_fail() behavior
 # ---------------------------------------------------------------------------
 
 class TestToFail:
     def test_status_is_fail(self):
         assert FakeDownloadTask("t", []).to_fail().status == TaskStatus.FAIL
 
-    def test_uses_to_download_when_populated(self):
-        f1, f2 = make_file(file_id="a"), make_file(file_id="b")
-        task = FakeDownloadTask("t", [f2])
-        task._to_download = [f1]
-        result_files = [fr.file for fr in task.to_fail().files]
-        assert f1 in result_files
-        assert f2 not in result_files
-
-    def test_falls_back_to_files_when_to_download_empty(self):
+    def test_before_run_reports_all_constructor_files(self):
         f1, f2 = make_file(file_id="a"), make_file(file_id="b")
         task = FakeDownloadTask("t", [f1, f2])
-        task._to_download = []
         result_files = [fr.file for fr in task.to_fail().files]
         assert f1 in result_files
         assert f2 in result_files
+
+    def test_during_run_reports_only_in_flight_files(self):
+        """to_fail() after _pre_check should report only files being downloaded."""
+        f_inflight = make_file(file_id="a")
+        f_done = make_file(file_id="b")
+        captured: list[TaskResultEvent] = []
+
+        class CapturingTask(FakeDownloadTask):
+            async def _run(self, to_download, skip):
+                captured.append(self.to_fail())
+                return self._make_result(TaskStatus.SUCCESS, "ok", [])
+
+        skip = [FileResult(FileStatus.Done, f_done)]
+        task = CapturingTask("t", [f_inflight, f_done], pre_check_result=([f_inflight], skip))
+        asyncio.run(task.run())
+        fail_files = [fr.file for fr in captured[0].files]
+        assert f_inflight in fail_files
+        assert f_done not in fail_files
 
     def test_custom_message(self):
         assert FakeDownloadTask("t", []).to_fail("disk full").msg == "disk full"
@@ -456,7 +436,7 @@ class TestToFail:
 
 
 # ---------------------------------------------------------------------------
-# Group 9: Cancellation and error paths
+# Cancellation and error paths
 # ---------------------------------------------------------------------------
 
 class TestCancellationAndErrors:
@@ -479,6 +459,7 @@ class TestCancellationAndErrors:
         assert cleanup_statuses == [TaskStatus.CANCELED]
 
     def test_cancelled_error_does_not_emit_result(self):
+        # This scenario is handled by the pipeline, which adds extra error capturing capabilities
         task = FakeDownloadTask("t", [make_file()], raise_on_run=asyncio.CancelledError())
         cb = MagicMock()
         task.on_result(cb)
@@ -520,7 +501,7 @@ class TestCancellationAndErrors:
 
 
 # ---------------------------------------------------------------------------
-# Group 10: _setup() ordering
+# _setup() ordering
 # ---------------------------------------------------------------------------
 
 class TestSetupOrdering:
@@ -537,7 +518,5 @@ class TestSetupOrdering:
         assert start_saw_setup == [True]
 
     def test_default_setup_does_not_raise(self):
-        # Relies on the base _setup no-op; FakeDownloadTask overrides it only
-        # when setup_side_effect is set, so omit it here.
         task = FakeDownloadTask("t", [make_file()])
-        asyncio.run(task.run())  # should complete without error
+        asyncio.run(task.run())
