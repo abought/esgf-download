@@ -143,7 +143,7 @@ class GlobusStatusTask(GlobusTaskCommon):
             skipped = set()
 
         fr = [
-            FileResult(FileStatus.Error if f in skipped else FileStatus.Done, f)
+            FileResult(FileStatus.Error if f.globus_fn in skipped else FileStatus.Done, f)
             for f in to_download
         ]
         return self._make_result(TaskStatus.SUCCESS, 'The transfer succeeded', fr)
