@@ -6,7 +6,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from esgpull.downloader.base import (
-    DownloadTask,
     FileResult,
     TaskHeartbeatEvent,
     TaskResultEvent,
@@ -14,80 +13,12 @@ from esgpull.downloader.base import (
     TaskStatus,
 )
 from esgpull.models import File, FileStatus
+from tests.downloader.fakes import FakeDownloadTask, FakeHeartbeatTask, make_file
 
 
 # ---------------------------------------------------------------------------
-# Test infrastructure
+# Mocks and support
 # ---------------------------------------------------------------------------
-
-def make_file(size: int = 0, file_id: str = "file") -> File:
-    f = File(
-        file_id=file_id,
-        dataset_id="dataset",
-        master_id="master",
-        url=f"https://example.com/{file_id}",
-        version="v0",
-        filename=f"{file_id}.nc",
-        local_path="project/folder",
-        data_node="data_node",
-        checksum="0",
-        checksum_type="0",
-        size=size,
-        status=FileStatus.Queued,
-    )
-    f.compute_sha()
-    return f
-
-
-class FakeDownloadTask(DownloadTask):
-    """Configurable concrete subclass for testing DownloadTask."""
-
-    def __init__(
-        self,
-        task_label: str,
-        files: list[File],
-        *,
-        pre_check_result=None,
-        run_result=None,
-        raise_on_run=None,
-        setup_side_effect=None,
-    ):
-        super().__init__(task_label, files)
-        self._pre_check_result = pre_check_result
-        self._run_result = run_result
-        self._raise_on_run = raise_on_run
-        self._setup_side_effect = setup_side_effect
-
-    async def _pre_check(self, files: list[File]) -> tuple[list[File], list[FileResult]]:
-        if self._pre_check_result is not None:
-            return self._pre_check_result
-        return files, []
-
-    async def _setup(self, to_download: list[File]) -> None:
-        if self._setup_side_effect:
-            self._setup_side_effect(self, to_download)
-
-    async def _run(self, to_download: list[File], skip: list[FileResult]) -> TaskResultEvent:
-        if self._raise_on_run is not None:
-            raise self._raise_on_run
-        if self._run_result is not None:
-            return self._run_result
-        return self._make_result(TaskStatus.SUCCESS, "ok", [])
-
-    async def _cleanup(self, result: TaskResultEvent) -> TaskResultEvent:
-        return result
-
-    def to_cancel(self) -> TaskResultEvent:
-        return self._make_result(TaskStatus.CANCELED, "cancelled", [])
-
-
-class FakeHeartbeatTask(FakeDownloadTask):
-    """Variant that emits one heartbeat per run, for callback testing."""
-
-    async def _run(self, to_download, skip):
-        self._emit_heartbeat(1, 0)
-        return self._make_result(TaskStatus.SUCCESS, "ok", [])
-
 
 class FakeExtraTask(FakeDownloadTask):
     """Variant that injects a fixed extra dict into all events."""
@@ -126,7 +57,7 @@ class FakeMutableHeartbeatTask(FakeMutableExtraTask):
 
 
 # ---------------------------------------------------------------------------
-# Callback registration
+# Tests
 # ---------------------------------------------------------------------------
 
 class TestCallbackRegistration:
@@ -163,10 +94,6 @@ class TestCallbackRegistration:
         assert cb1.call_count == 1
         assert cb2.call_count == 1
 
-
-# ---------------------------------------------------------------------------
-# run() — event sequence
-# ---------------------------------------------------------------------------
 
 class TestRunEventSequence:
     def test_start_fires_before_result(self):
@@ -258,10 +185,6 @@ class TestRunEventSequence:
         assert isinstance(captured[0], datetime)
 
 
-# ---------------------------------------------------------------------------
-# TaskStartEvent field correctness
-# ---------------------------------------------------------------------------
-
 class TestStartEventFields:
     def _capture_start(self, task: FakeDownloadTask) -> TaskStartEvent:
         captured: list[TaskStartEvent] = []
@@ -294,10 +217,6 @@ class TestStartEventFields:
         assert event.start_time.tzinfo is not None
 
 
-# ---------------------------------------------------------------------------
-# TaskHeartbeatEvent field correctness
-# ---------------------------------------------------------------------------
-
 class TestHeartbeatEventFields:
     def _capture_heartbeats(self, task: FakeDownloadTask) -> list[TaskHeartbeatEvent]:
         captured: list[TaskHeartbeatEvent] = []
@@ -327,10 +246,6 @@ class TestHeartbeatEventFields:
         assert events[0].event_time.tzinfo is not None
 
 
-# ---------------------------------------------------------------------------
-# TaskResultEvent field correctness
-# ---------------------------------------------------------------------------
-
 class TestResultEventFields:
     def test_task_label(self):
         task = FakeDownloadTask("my-label", [])
@@ -347,10 +262,6 @@ class TestResultEventFields:
         result = asyncio.run(task.run())
         assert result.end_time >= result.start_time
 
-
-# ---------------------------------------------------------------------------
-# .extra propagation
-# ---------------------------------------------------------------------------
 
 class TestExtraPropagation:
     def test_extra_in_start_event(self):
@@ -382,10 +293,6 @@ class TestExtraPropagation:
         assert captured[0] == {"value": "first"}
         assert captured[1] == {"value": "second"}
 
-
-# ---------------------------------------------------------------------------
-# to_fail() behavior
-# ---------------------------------------------------------------------------
 
 class TestToFail:
     def test_status_is_fail(self):
@@ -434,10 +341,6 @@ class TestToFail:
         task = FakeDownloadTask("t", [make_file()])
         assert all(fr.status == FileStatus.Error for fr in task.to_fail().files)
 
-
-# ---------------------------------------------------------------------------
-# Cancellation and error paths
-# ---------------------------------------------------------------------------
 
 class TestCancellationAndErrors:
     def test_cancelled_error_is_reraised(self):
@@ -499,10 +402,6 @@ class TestCancellationAndErrors:
             asyncio.run(task.run())
         assert task._start_time is not None
 
-
-# ---------------------------------------------------------------------------
-# _setup() ordering
-# ---------------------------------------------------------------------------
 
 class TestSetupOrdering:
     def test_setup_completes_before_start_fires(self):
