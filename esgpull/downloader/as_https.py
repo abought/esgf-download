@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import ssl
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -97,36 +98,41 @@ class HttpsDownloadTask(DownloadTask):
                 verify=self._ssl_context,
                 timeout=self._http_timeout,
             )
-        async with client_ctx as client:
-            for file in to_download:
-                file_path = self._fs[file]
-                digest = Digest(file) if not self._disable_checksum else None
-                status = FileStatus.Error
+        try:
+            async with client_ctx as client:
+                for file in to_download:
+                    file_path = self._fs[file]
+                    digest = Digest(file) if not self._disable_checksum else None
+                    status = FileStatus.Error
 
-                try:
-                    async with aiofiles.open(file_path.tmp, 'wb') as f:
-                        async with client.stream('GET', file.url) as resp:
-                            resp.raise_for_status()
-                            async for chunk in resp.aiter_bytes(chunk_size=self._chunk_size):
-                                await f.write(chunk)
-                                if digest is not None:
-                                    digest.update(chunk)
-                                bytes_completed += len(chunk)
-                                self._emit_heartbeat(files_completed, bytes_completed)
+                    try:
+                        async with aiofiles.open(file_path.tmp, 'wb') as f:
+                            async with client.stream('GET', file.url) as resp:
+                                resp.raise_for_status()
+                                async for chunk in resp.aiter_bytes(chunk_size=self._chunk_size):
+                                    await f.write(chunk)
+                                    if digest is not None:
+                                        digest.update(chunk)
+                                    bytes_completed += len(chunk)
+                                    self._emit_heartbeat(files_completed, bytes_completed)
 
-                    file_path.tmp.rename(file_path.done)
+                        file_path.tmp.rename(file_path.done)
 
-                    if digest is None or digest.hexdigest() == file.checksum:
-                        status = FileStatus.Done
-                except:
-                    # Log exception; external caller just sees the task marked as failed
-                    logger.exception(f"Download failed for file {file.file_id} in task {self._task_label}")
-                    pass
+                        if digest is None or digest.hexdigest() == file.checksum:
+                            status = FileStatus.Done
+                    except Exception as e:
+                        if isinstance(e, OSError) and e.errno == errno.ENOSPC:
+                            raise  # disk full affects all files — propagate as task-level failure
+                        logger.exception(f"Download failed for file {file.file_id} in task {self._task_label}")
 
-                # Report the file as processed for progress tracking purposes
-                results.append(FileResult(status, file))
-                files_completed += 1
-                self._emit_heartbeat(files_completed, bytes_completed)
+                    # Report the file as processed for progress tracking purposes
+                    results.append(FileResult(status, file))
+                    files_completed += 1
+                    self._emit_heartbeat(files_completed, bytes_completed)
+
+        except Exception:
+            logger.exception(f"Task-level failure in task {self._task_label}")
+            return self.to_fail("Task-level failure during download")
 
         return self._make_result(TaskStatus.SUCCESS, 'Download complete', results)
 
@@ -135,15 +141,19 @@ class HttpsDownloadTask(DownloadTask):
         Move successfully downloaded files to their final DRS path.
         Delete any .done or .part temp files left behind by failures.
         """
-        for fr in result.files:
-            file_path = self._fs[fr.file]
-            if fr.status == FileStatus.Done:
-                if file_path.done.is_file():
-                    self._fs.move_to_drs(fr.file)
-            else:
-                for path in (file_path.done, file_path.tmp):
-                    if path.is_file():
-                        path.unlink()
+        try:
+            for fr in result.files:
+                file_path = self._fs[fr.file]
+                if fr.status == FileStatus.Done:
+                    if file_path.done.is_file():
+                        self._fs.move_to_drs(fr.file)
+                else:
+                    for path in (file_path.done, file_path.tmp):
+                        if path.is_file():
+                            path.unlink()
+        except Exception:
+            logger.exception(f"Filesystem error during cleanup for task {self._task_label}")
+            return self.to_fail("Filesystem error during cleanup")
         return result
 
 

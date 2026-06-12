@@ -67,7 +67,7 @@ def success_client(content: bytes) -> httpx.AsyncClient:
     return make_client(lambda req: httpx.Response(200, content=content))
 
 
-@pytest.fixture
+@pytest.fixture(scope="function")
 def fs(tmp_path):
     return FakeFilesystem(tmp_path)
 
@@ -405,6 +405,66 @@ class TestCleanup:
         result = TaskResultEvent("t", TaskStatus.SUCCESS, "ok", [], {}, None)
         returned = asyncio.run(self._task(fs)._cleanup(result))
         assert returned is result
+
+    def test_move_to_drs_error_yields_task_fail(self, fs):
+        file = make_https_file(b"data")
+        fp = fs[file]
+        fp.done.parent.mkdir(parents=True, exist_ok=True)
+        fp.done.write_bytes(b"data")
+
+        def bad_move(f):
+            raise OSError("permission denied")
+        fs.move_to_drs = bad_move
+
+        task = HttpsDownloadTask("t", [file], fs=fs)
+        task._to_download = [file]
+        result = asyncio.run(task._cleanup(self._result(file, FileStatus.Done)))
+        assert result.status == TaskStatus.FAIL
+        assert all(fr.status == FileStatus.Error for fr in result.files)
+
+
+class TestRunTaskLevelErrors:
+    def test_disk_full_yields_task_fail(self, fs, monkeypatch):
+        import errno as errno_module
+        from esgpull.downloader import as_https
+
+        def bad_open(*args, **kwargs):
+            raise OSError(errno_module.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(as_https.aiofiles, "open", bad_open)
+
+        file = make_file()
+        task = HttpsDownloadTask(
+            "t", [file], fs=fs,
+            client=make_client(lambda req: httpx.Response(200, content=b"data")),
+            disable_checksum=True,
+        )
+        result = asyncio.run(task.run())
+        assert result.status == TaskStatus.FAIL
+        assert all(fr.status == FileStatus.Error for fr in result.files)
+
+    def test_disk_full_stops_remaining_files(self, fs, monkeypatch):
+        """ENOSPC on the first file should not attempt the second."""
+        import errno as errno_module
+        from esgpull.downloader import as_https
+
+        open_calls = []
+
+        def bad_open(*args, **kwargs):
+            open_calls.append(args[0])
+            raise OSError(errno_module.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(as_https.aiofiles, "open", bad_open)
+
+        f1, f2 = make_file(file_id="a"), make_file(file_id="b")
+        task = HttpsDownloadTask(
+            "t", [f1, f2], fs=fs,
+            client=make_client(lambda req: httpx.Response(200, content=b"data")),
+            disable_checksum=True,
+        )
+        result = asyncio.run(task.run())
+        assert result.status == TaskStatus.FAIL
+        assert len(open_calls) == 1  # stopped after first failure
 
 
 class TestIntegration:

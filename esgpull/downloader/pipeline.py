@@ -1,3 +1,4 @@
+"""Legacy functionality for esgf file downloads"""
 import asyncio
 import ssl
 from collections.abc import AsyncIterator

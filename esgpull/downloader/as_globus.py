@@ -23,9 +23,9 @@ from esgpull.tui import logger
 
 
 class GlobusTaskCommon(DownloadTask, ABC):
-    """Common behaviors for all globus task types"""
+    """Common behaviors for all Globus task types"""
     _transfer_task_id: Optional[str] = None
-    _globus_task_status: Optional[GlobusTransferStatus]
+    _globus_task_status: Optional[GlobusTransferStatus] = None
 
     def __init__(
             self,
