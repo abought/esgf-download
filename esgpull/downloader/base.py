@@ -17,6 +17,7 @@ class TaskStatus(enum.IntEnum):
     CANCELED = 1
     SUCCESS = 2
     FAIL = 3
+    UNKNOWN = 4  # status could not be determined due to transient issues
 
 @dataclass(frozen=True)
 class FileResult:
@@ -163,6 +164,11 @@ class DownloadTask(ABC):
         Define how to record status if the program is interrupted.
         """
         raise NotImplementedError
+
+    def to_unknown(self, msg: str = "Transfer status could not be determined") -> TaskResultEvent:
+        items = self._to_download or self._files
+        fr = [FileResult(FileStatus.Started, f) for f in items]
+        return self._make_result(TaskStatus.UNKNOWN, msg, fr)
 
     def to_fail(self, msg: str = "An unknown error occurred") -> TaskResultEvent:
         """

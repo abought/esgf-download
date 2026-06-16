@@ -5,7 +5,7 @@ import asyncio
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING, TypedDict
 
-from globus_sdk import TransferData, GlobusAPIError
+from globus_sdk import TransferData, GlobusAPIError, NetworkError
 
 from esgpull.models import File, GlobusTransferStatus
 
@@ -77,7 +77,7 @@ class GlobusStatusTask(GlobusTaskCommon):
         transfer_task_id: str,  # the task ID from the globus transfer api
 
         wait_until_resolved: bool = True,
-        poll_time_max: int = 60 * 100
+        poll_time_max: int = 60 * 90
     ):
         super().__init__(task_label, files, client)
         self._transfer_task_id = transfer_task_id
@@ -121,11 +121,28 @@ class GlobusStatusTask(GlobusTaskCommon):
         return {f['source_path'] for f in skip_resp.items()}
 
     ### Implementation
-    async def _run(self, to_download: list[File], skip: list[FileResult], **kwargs) -> TaskResultEvent:
-        if not self._wait_until_resolved:
-            status, has_skipped = await self._check_transfer_status()
+    def _handle_globus_exc(self, e: GlobusAPIError | NetworkError) -> TaskResultEvent:
+        if isinstance(e, GlobusAPIError):
+            if e.http_status in (401, 403):
+                logger.error(
+                    "Globus authorization error (%s) for task %s — re-authentication required",
+                    e.http_status, self._transfer_task_id
+                )
+            else:
+                logger.warning("Globus API error (%s) checking task %s", e.http_status, self._transfer_task_id)
+            return self.to_unknown(f"Globus API error ({e.http_status})")
         else:
-            status, has_skipped = await self._poll_for_completion()
+            logger.warning("Globus API unreachable checking task %s: %s", self._transfer_task_id, e)
+            return self.to_unknown("Globus API unreachable")
+
+    async def _run(self, to_download: list[File], skip: list[FileResult], **kwargs) -> TaskResultEvent:
+        try:
+            if not self._wait_until_resolved:
+                status, has_skipped = await self._check_transfer_status()
+            else:
+                status, has_skipped = await self._poll_for_completion()
+        except (GlobusAPIError, NetworkError) as e:
+            return self._handle_globus_exc(e)
 
         if status == GlobusTransferStatus.FAILED:
             return self.to_fail(msg="Globus transfer failed")
@@ -137,10 +154,10 @@ class GlobusStatusTask(GlobusTaskCommon):
             )
 
         # Handle tasks that succeeded, and check list of completed files
-        if has_skipped:
-            skipped = await self._check_skipped_errors()
-        else:
-            skipped = set()
+        try:
+            skipped = await self._check_skipped_errors() if has_skipped else set()
+        except (GlobusAPIError, NetworkError) as e:
+            return self._handle_globus_exc(e)
 
         fr = [
             FileResult(FileStatus.Error if f.globus_fn in skipped else FileStatus.Done, f)
@@ -183,7 +200,7 @@ class GlobusTransferTask(GlobusTaskCommon):
         td = TransferData(
             self._source_collection_id,
             self._dest_collection_id,
-            skip_source_errors=True,  # if a file doesn't exist, we'll capture from event ,log rather than retrying
+            skip_source_errors=True,  # if a file doesn't exist, we'll capture from event log rather than retrying
             verify_checksum=True,
             encrypt_data=True,
             sync_level="checksum"
