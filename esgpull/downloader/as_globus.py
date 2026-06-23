@@ -123,6 +123,13 @@ class GlobusStatusTask(GlobusTaskCommon):
     ### Implementation
     def _handle_globus_exc(self, e: GlobusAPIError | NetworkError) -> TaskResultEvent:
         if isinstance(e, GlobusAPIError):
+            if e.http_status == 404:
+                # The task ID is gone (expired or otherwise invalid): no amount of retrying the status
+                # check will ever resolve it, so don't leave files stuck in Started — mark for retry.
+                logger.error(
+                    "Globus task %s not found — transfer can never be resolved", self._transfer_task_id
+                )
+                return self.to_fail(f"Globus task {self._transfer_task_id} not found")
             if e.http_status in (401, 403):
                 logger.error(
                     "Globus authorization error (%s) for task %s — re-authentication required",
