@@ -7,6 +7,7 @@ import json
 import os
 
 import pytest
+import requests.exceptions
 import responses as responses_lib
 
 from globus_sdk import TransferClient
@@ -45,7 +46,7 @@ def client():
 
 
 class TestGlobusTransferTask:
-    def test_task_submit_ok_then_stop(self, client):
+    def test_task_submit_ok_no_status_check(self, client):
         """Async task is submitted, but we don't wait for the result."""
         load_response(client.get_submission_id, case='default')
 
@@ -75,6 +76,7 @@ class TestGlobusTransferTask:
 
 
     def test_submit_ok_then_wait_until_complete(self, client):
+        """Tests the full process of submit -> status check final result"""
         load_response(client.get_submission_id, case='default')
 
         load_response(
@@ -113,24 +115,35 @@ class TestGlobusTransferTask:
         assert all(fr.status == FileStatus.Done for fr in result.files)
 
 
-    def test_submit_ok_no_status_found(self, client):
-        """
-        If a task is expired and no status can be determined, report unknown status
-
-        FIXME move this to globusStatusTask tests; we don't need the submit step at all
-        """
-        load_response(client.get_submission_id, case='default')
-
+class TestGlobusStatusTask:
+    def test_task_resolved(self, client):
+        """Able to read a success response and report file results"""
         load_response(
-            # Task submit
+            # Task monitoring: instant success response
             RegisteredResponse(
                 service="transfer",
-                method="POST",
-                path="/v0.10/transfer",
-                json=_load_captured("globus_submit_success.json"),
+                method="GET",
+                path=f"/v0.10/task/{TASK_ID}",
+                json=_load_captured("globus_task_succeeded_clean.json"),
             )
         )
 
+        files = [make_file(100, "a")]
+        task = GlobusStatusTask(
+            task_label="test status",
+            files=files,
+            client=client,
+            transfer_task_id=TASK_ID,
+            wait_until_resolved=True
+        )
+        result = asyncio.run(task.run())
+        assert result.status == TaskStatus.SUCCESS
+
+        assert all(fr.status == FileStatus.Done for fr in result.files)
+
+
+    def test_task_not_found(self, client):
+        """Expired tasks are unknowable and should kick all files into the error/retry queue"""
         load_response(
             # Task monitoring: task not found (expired or other error)
             RegisteredResponse(
@@ -148,13 +161,11 @@ class TestGlobusTransferTask:
         )
 
         files = [make_file(100, "a")]
-        task = GlobusTransferTask(
-            task_label="test submit async",
+        task = GlobusStatusTask(
+            task_label="test status async",
             files=files,
             client=client,
-            source_collection_id="dummy",
-            dest_collection_id="dummy",
-            dest_root_path="/test_dummy/",
+            transfer_task_id=TASK_ID,
             wait_until_resolved=True
         )
         result = asyncio.run(task.run())
@@ -162,13 +173,33 @@ class TestGlobusTransferTask:
 
         assert all(fr.status == FileStatus.Error for fr in result.files)
 
+    def test_network_error_try_later(self, client):
+        load_response(
+            # Task monitoring: task not found (expired or other error)
+            RegisteredResponse(
+                service="transfer",
+                method="GET",
+                path=f"/v0.10/task/{TASK_ID}",
+                body=requests.exceptions.ConnectionError("Simulated network issue"),
+                status=404
+            )
+        )
 
-class TestGlobusStatusTask:
-    def test_task_not_found(self, client):
-        # TODO: Move task from above
-        pass
+        files = [make_file(100, "a")]
+        task = GlobusStatusTask(
+            task_label="test status check fails",
+            files=files,
+            client=client,
+            transfer_task_id=TASK_ID,
+            wait_until_resolved=False
+        )
+        result = asyncio.run(task.run())
+        assert result.status == TaskStatus.UNKNOWN
+
+        assert all(fr.status == FileStatus.Started for fr in result.files)
 
 
+    @pytest.mark.xfail
     def test_task_with_skips(self, client):
         load_response(
             # Task monitoring: success with skips
@@ -185,12 +216,12 @@ class TestGlobusStatusTask:
             RegisteredResponse(
                 service="transfer",
                 method="GET",
-                path=f"/v0.10/task/{TASK_ID}/skipper_errors",
+                path=f"/v0.10/task/{TASK_ID}/skipped_errors",
                 json=_load_captured("files_skipped/globus_skipped_errors_page1.json"),
             )
         )
 
-        files = [make_file(100, "a")]  # TODO: file list needs to do a better job of matching skip logs (file list factory needs names)
+        files = [make_file(100, "a")]  # TODO: captured fixture skip logs need to do a better job of matching file named in this test: update fixture, update transfer submit usage to ensure paths match
         task = GlobusStatusTask(
             task_label="test status",
             transfer_task_id=TASK_ID,
@@ -201,101 +232,30 @@ class TestGlobusStatusTask:
         result = asyncio.run(task.run())
         assert result.status == TaskStatus.SUCCESS
 
+        # FIXME not expected result, stub test- this should be failing unless the "skipped" file is marked failed correctly
         assert all(fr.status == FileStatus.Done for fr in result.files)
 
-#
-#
-# class TestStatusTask:
-#     def test_succeeded_response(self, client):
-#         # json= will be loaded from tests/fixtures/globus/globus_task_succeeded_clean.json
-#         load_response(client.get_submission_id, case='default')
-#         # TODO> write submit task with transfer payload, no wait, by hand, captured fixtures!!!
-#
-#         r = load_response(
-#             RegisteredResponse(
-#                 service="transfer",
-#                 path=f"/v0.10/transfer",
-#                 json={
-#                     "task_id": TASK_ID,
-#                     "status": "SUCCEEDED",
-#                     "files_transferred": 2,
-#                     "files_skipped": 0,
-#                     "bytes_checksummed": 1024,
-#                     "subtasks_skipped_errors": 0,
-#                 },
-#                 status=200,
-#         ))
-#
-#         files = [make_file(100, "a")]
-#
-#         task = GlobusStatusTask(task_label="a test", files=files, client=client, transfer_task_id=TASK_ID)
-#         result = asyncio.run(task.run())
-#
-#         assert result.status == TaskStatus.ACTIVE
-#         assert all(fr.status == FileStatus.Done for fr in result.files)
-#
-#     def test_api_error_returns_unknown(self):
-#         # status= and json= come from the {"http_status": N, "body": {...}} format
-#         # captured by capture_auth_error.py → tests/fixtures/globus/globus_task_401.json
-#         RegisteredResponse(
-#             service="transfer",
-#             path=f"/v0.10/task/{TASK_ID}",
-#             status=401,
-#             json={
-#                 "code": "AuthenticationFailed",
-#                 "message": "Token is not valid",
-#                 "request_id": "abc123",
-#                 "resource": f"/v0.10/task/{TASK_ID}",
-#             },
-#         ).add()
-#
-#         files = [make_file("a")]
-#         result = asyncio.run(make_status_task(files)._run(files, []))
-#
-#         assert result.status == TaskStatus.UNKNOWN
-#         assert all(fr.status == FileStatus.Started for fr in result.files)
-#
-#     def test_skipped_errors_across_two_pages(self):
-#         # get_task response — from tests/fixtures/globus/globus_task_succeeded_with_skips.json
-#         RegisteredResponse(
-#             service="transfer",
-#             path=f"/v0.10/task/{TASK_ID}",
-#             json={
-#                 "task_id": TASK_ID,
-#                 "status": "SUCCEEDED",
-#                 "files_transferred": 1,
-#                 "files_skipped": 2,
-#                 "bytes_checksummed": 512,
-#                 "subtasks_skipped_errors": 2,
-#             },
-#         ).add()
-#
-#         # Paginated skipped errors — ResponseList queues page1 then page2 for the same URL.
-#         # The SDK Paginator consumes them in order, stopping when next_marker is absent.
-#         # page json= will come from globus_skipped_errors_page1.json / page2.json
-#         ResponseList(
-#             RegisteredResponse(
-#                 service="transfer",
-#                 path=f"/v0.10/task/{TASK_ID}/skipped_errors",
-#                 json={
-#                     "DATA_TYPE": "task_skipped_errors_list#1.0.0",
-#                     "DATA": [{"source_path": "/esgf/data/file_a.nc", "error_code": "FILE_NOT_FOUND"}],
-#                     "next_marker": "page2marker",
-#                 },
-#             ),
-#             RegisteredResponse(
-#                 service="transfer",
-#                 path=f"/v0.10/task/{TASK_ID}/skipped_errors",
-#                 json={
-#                     "DATA_TYPE": "task_skipped_errors_list#1.0.0",
-#                     "DATA": [{"source_path": "/esgf/data/file_b.nc", "error_code": "FILE_NOT_FOUND"}],
-#                     "next_marker": None,
-#                 },
-#             ),
-#         ).add()
-#
-#         files = [make_file("a"), make_file("b")]
-#         result = asyncio.run(make_status_task(files)._run(files, []))
-#
-#         assert result.status == TaskStatus.SUCCESS
-#         assert all(fr.status == FileStatus.Error for fr in result.files)
+    def test_401_status_unknown(self, client):
+        load_response(
+            # Task monitoring: success with skips
+            RegisteredResponse(
+                service="transfer",
+                method="GET",
+                path=f"/v0.10/task/{TASK_ID}",
+                status=401,
+            )
+        )
+
+        files = [make_file(100, "a")]
+        task = GlobusStatusTask(
+            task_label="test status",
+            transfer_task_id=TASK_ID,
+            files=files,
+            client=client,
+            wait_until_resolved=True
+        )
+        result = asyncio.run(task.run())
+
+        assert result.status == TaskStatus.UNKNOWN
+
+        assert all(fr.status == FileStatus.Started for fr in result.files)

@@ -96,4 +96,5 @@ dev = [
     "responses>=0.26.1",
     "types-aiofiles>=25.1.0.20251011",
     "types-pyyaml>=6.0.12.20250915",
+    "types-requests>=2.33.0.20260518",
 ]
