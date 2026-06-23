@@ -1,0 +1,9 @@
+{
+  "http_status": 404,
+  "body": {
+    "code": "EndpointNotFound",
+    "message": "No such endpoint 'd8a34ada-3b72-433d-b65e-90405acfd17b'",
+    "request_id": "iC62ZZmLs",
+    "resource": "/transfer"
+  }
+}

@@ -262,7 +262,15 @@ class DownloadTask(ABC):
         to_download, skip = await self._pre_check(self._files)
         self._to_download = to_download
 
-        await self._setup(to_download)  # side-effecty prepare any info needed for start event
+        try:
+            await self._setup(to_download)  # side-effecty prepare any info needed for start event
+        except Exception as e:
+            # Nothing was actually started (eg the remote service rejected submission), so there's
+            # no start event to emit. Report it the same way the orchestrator's own catch-all would.
+            final = await self._cleanup(self.to_fail(str(e)))
+            self._emit_result(final)
+            return final
+
         self._emit_start(to_download, skip)
 
         try:

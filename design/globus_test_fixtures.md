@@ -88,13 +88,6 @@ A paused collection puts the transfer in `INACTIVE` status. `GlobusTransferStatu
 
 ## Additional cases
 
-### m) External cancellation of the transfer
-If a transfer is canceled via the Globus web UI or another client, `get_task()` returns `status: "CANCELED"`. `GlobusTransferStatus["CANCELED"]` raises `KeyError` because `CANCELED` is not in the enum. **This is an unhandled crash path.**
-
-**Fix needed:** Add `CANCELED` to `GlobusTransferStatus`, or handle it explicitly in `_check_transfer_status`.
-
-**Fixture:** `globus_task_canceled.json` — `get_task` response with `CANCELED` status.
-
 ### n) Authentication expiry mid-session
 Credentials expire between `submit_transfer()` and a later `get_task()` poll. Raises `GlobusAPIError` 401. Currently treated the same as a 503 (permanent `FAIL`). Correct given the program cannot re-authenticate automatically, but should produce a meaningful error message.
 
@@ -120,7 +113,6 @@ These should be resolved before or alongside the tests:
 
 | Gap | Affected cases | Notes |
 |-----|---------------|-------|
-| `CANCELED` not in `GlobusTransferStatus` | m | `KeyError` crash on externally-canceled transfers |
 | No retry for transient API errors during polling | k | 503/rate-limit permanently fails the task |
 | `INACTIVE` indistinguishable from `ACTIVE` in output | l | Consider surfacing in `_get_extra()` or logs |
 
@@ -138,7 +130,6 @@ These should be resolved before or alongside the tests:
 | `globus_task_succeeded_clean.json` | h | `get_task` response — `SUCCEEDED`, no skips |
 | `globus_task_succeeded_with_skips.json` | b, g, o | `get_task` response — `SUCCEEDED` with `subtasks_skipped_errors > 0` |
 | `globus_task_failed.json` | c, f, j | `get_task` response — `FAILED` with error detail |
-| `globus_task_canceled.json` | m | `get_task` response — `CANCELED` status |
 | `globus_task_503.json` | k | `GlobusAPIError` body for service outage |
 | `globus_task_401.json` | n | `GlobusAPIError` body for expired credentials |
 | `globus_skipped_errors_page1.json` | b, g, o, p | `task_skipped_errors` first page; paths must match `file.globus_fn` format |
