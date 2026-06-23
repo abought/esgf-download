@@ -1,0 +1,20 @@
+{
+  "DATA": [
+    {
+      "DATA_TYPE": "skipped_error",
+      "checksum_algorithm": null,
+      "destination_path": "/deleteme/skip-missing-file/fake.txt",
+      "error_code": "FILE_NOT_FOUND",
+      "error_details": "550-GlobusError: v=1 c=PATH_NOT_FOUND\r\n550-GridFTP-Errno: 2\r\n550-GridFTP-Reason: System error in stat\r\n550-GridFTP-Error-String: No such file or directory\r\n550 End.\r\n",
+      "error_time": "2026-06-23T03:16:55+00:00",
+      "external_checksum": null,
+      "is_delete_destination_extra": false,
+      "is_directory": false,
+      "is_symlink": false,
+      "source_path": "/home/u_24weaxffujbulbpdjk42up2a5u/fake.txt"
+    }
+  ],
+  "DATA_TYPE": "skipped_errors",
+  "marker": 0,
+  "next_marker": null
+}

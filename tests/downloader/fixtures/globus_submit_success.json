@@ -1,0 +1,16 @@
+{
+  "DATA_TYPE": "transfer_result",
+  "code": "Accepted",
+  "message": "The transfer has been accepted and a task has been created and queued for execution",
+  "request_id": "ByfSXrYjs",
+  "resource": "/transfer",
+  "submission_id": "00000000-0000-0000-0000-000000000001",
+  "task_id": "00000000-0000-0000-0000-000000000001",
+  "task_link": {
+    "DATA_TYPE": "link",
+    "href": "task/00000000-0000-0000-0000-000000000001?format=json",
+    "rel": "related",
+    "resource": "task",
+    "title": "related task"
+  }
+}
