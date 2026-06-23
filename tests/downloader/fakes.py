@@ -1,16 +1,22 @@
 """Shared test doubles for downloader unit tests."""
 from esgpull.downloader.base import DownloadTask, FileResult, TaskResultEvent, TaskStatus
 from esgpull.models import File, FileStatus
+from esgpull.models.globus_storage import GlobusStorage
 
 
-def make_file(size: int = 0, file_id: str = "file") -> File:
+def make_file(
+    size: int = 0,
+    file_id: str = "file",
+    filename: str | None = None,
+    globus_origin_path: str | None = None,
+) -> File:
     f = File(
         file_id=file_id,
         dataset_id="dataset",
         master_id="master",
         url=f"https://example.com/{file_id}",
         version="v0",
-        filename=f"{file_id}.nc",
+        filename=filename or f"{file_id}.nc",
         local_path="project/folder",
         data_node="data_node",
         checksum="0",
@@ -18,6 +24,8 @@ def make_file(size: int = 0, file_id: str = "file") -> File:
         size=size,
         status=FileStatus.Queued,
     )
+    if globus_origin_path is not None:
+        f.globus_storage = GlobusStorage(origin_id="source-collection-uuid", origin_path=globus_origin_path)
     f.compute_sha()
     return f
 

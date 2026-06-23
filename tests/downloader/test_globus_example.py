@@ -199,8 +199,9 @@ class TestGlobusStatusTask:
         assert all(fr.status == FileStatus.Started for fr in result.files)
 
 
-    @pytest.mark.xfail
     def test_task_with_skips(self, client):
+        """Two files submitted: one is skipped by Globus, one succeeds. Overall task SUCCESS,
+        but each file's result must reflect its own outcome."""
         load_response(
             # Task monitoring: success with skips
             RegisteredResponse(
@@ -221,7 +222,14 @@ class TestGlobusStatusTask:
             )
         )
 
-        files = [make_file(100, "a")]  # TODO: captured fixture skip logs need to do a better job of matching file named in this test: update fixture, update transfer submit usage to ensure paths match
+        # The skipped_errors fixture's source_path is "/home/u_24weaxffujbulbpdjk42up2a5u/fake.txt".
+        # globus_fn = origin_path + filename, so this file must reproduce that path exactly to be
+        # recognized as the skipped one; "present" shares the origin but not the filename.
+        origin_path = "/home/u_24weaxffujbulbpdjk42up2a5u"
+        skipped = make_file(100, "missing", filename="fake.txt", globus_origin_path=origin_path)
+        ok = make_file(100, "present", globus_origin_path=origin_path)
+
+        files = [skipped, ok]
         task = GlobusStatusTask(
             task_label="test status",
             transfer_task_id=TASK_ID,
@@ -232,8 +240,9 @@ class TestGlobusStatusTask:
         result = asyncio.run(task.run())
         assert result.status == TaskStatus.SUCCESS
 
-        # FIXME not expected result, stub test- this should be failing unless the "skipped" file is marked failed correctly
-        assert all(fr.status == FileStatus.Done for fr in result.files)
+        by_id = {fr.file.file_id: fr.status for fr in result.files}
+        assert by_id["missing"] == FileStatus.Error
+        assert by_id["present"] == FileStatus.Done
 
     def test_401_status_unknown(self, client):
         load_response(
