@@ -2,7 +2,7 @@
   "DATA_TYPE": "transfer_result",
   "code": "Accepted",
   "message": "The transfer has been accepted and a task has been created and queued for execution",
-  "request_id": "ByfSXrYjs",
+  "request_id": "ANONYMIZED_REQUEST_ID",
   "resource": "/transfer",
   "submission_id": "00000000-0000-0000-0000-000000000001",
   "task_id": "00000000-0000-0000-0000-000000000001",
