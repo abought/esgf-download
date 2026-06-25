@@ -1,0 +1,9 @@
+{
+  "http_status": 404,
+  "body": {
+    "code": "ClientError.NotFound",
+    "message": "No task found with id '00000000-0000-0000-0000-000000000001'",
+    "request_id": "REDACTED",
+    "resource": "/task/00000000-0000-0000-0000-000000000001"
+  }
+}

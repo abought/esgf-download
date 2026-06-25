@@ -443,19 +443,15 @@ class TestGlobusStatusTask:
 
     def test_task_not_found(self, client):
         """Expired tasks are unknowable and should kick all files into the error/retry queue"""
+        fixture = _load_captured("globus_task_404.json")
         load_response(
             # Task monitoring: task not found (expired or other error)
             RegisteredResponse(
                 service="transfer",
                 method="GET",
                 path=f"/v0.10/task/{TASK_ID}",
-                json={
-                  "code": "ClientError.NotFound",
-                  "message": "No task found with id '00000000-0000-0000-0000-000000000001'",
-                  "request_id": "REDACTED",
-                  "resource": "/task/00000000-0000-0000-0000-000000000001"
-                },
-                status=404
+                status=fixture["http_status"],
+                json=fixture["body"],
             )
         )
 
