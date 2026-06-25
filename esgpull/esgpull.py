@@ -1,17 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from functools import cached_property, partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
 from warnings import warn
-
-if TYPE_CHECKING:
-    from globus_sdk import TransferClient
 
 from rich.live import Live
 from rich.progress import (
@@ -30,11 +25,7 @@ from rich.progress import (
 from esgpull.config import Config
 from esgpull.context import Context
 from esgpull.database import Database
-from esgpull.downloader.as_globus import GlobusTransferTask, GlobusStatusTask
 from esgpull.downloader.as_https import DownloadCtx
-from esgpull.downloader.base import FileResult, TaskResultEvent, TaskStartEvent
-from esgpull.downloader.factory import partition_by_transfer_method, make_https_tasks, make_globus_tasks
-from esgpull.downloader.orchestrator import Orchestrator
 from esgpull.exceptions import (
     DownloadCancelled,
     InvalidInstallPath,
@@ -48,8 +39,6 @@ from esgpull.models import (
     Facet,
     File,
     FileStatus,
-    GlobusTransfer,
-    GlobusTransferStatus,
     LegacyQuery,
     Options,
     Query,
@@ -516,193 +505,6 @@ class Esgpull:
                 if use_db:
                     self.db.add(*cancelled)
         return files, errors
-
-
-    async def check_globus_transfers(self, transfer_client: TransferClient) -> None:
-        """
-        Poll any Globus transfers that were in progress from a previous run and
-        update the database with their current status.
-
-        For transfers that have reached a terminal state (SUCCEEDED or FAILED),
-        the status of each associated file is also updated.
-
-        """
-        # FIXME move this function outside of esgpull core
-        app = self
-
-        pending: Sequence[GlobusTransfer] = self.db.scalars(sql.globus_transfer.pending())
-        if not pending:
-            return
-
-        orchestrator = Orchestrator()
-        transfer_by_task_id: dict[str, GlobusTransfer] = {}
-
-        for transfer in pending:
-            files = list(transfer.files)
-            if not files:
-                logger.warning(
-                    f"GlobusTransfer {transfer.task_id} has no associated files; skipping."
-                )
-                continue
-
-            task = GlobusStatusTask(
-                task_label=transfer.task_id,
-                files=files,
-                client=transfer_client,
-                transfer_task_id=transfer.task_id,
-                wait_until_resolved=False
-            )
-
-
-            orchestrator.add_remote_task(task)
-            transfer_by_task_id[transfer.task_id] = transfer
-
-        is_complete = {GlobusTransferStatus.SUCCEEDED, GlobusTransferStatus.FAILED}
-
-        async for result in orchestrator.iter_results():
-            tid = result.extra.get('globus_task_id')
-            ts = result.extra.get('globus_task_status')
-
-            assert isinstance(tid, str)  # generic status class with type-specific extra fields
-            assert isinstance(ts, GlobusTransferStatus)
-
-            transfer = transfer_by_task_id[tid]
-
-            if transfer:
-                transfer.status = ts
-                transfer.last_updated = datetime.now(timezone.utc)
-
-            if ts in is_complete:
-                # If task is complete, update status info for all associated files
-                transfer.completion_time = result.end_time
-                self.db.add(transfer)
-
-                for fr in result.files:
-                    fr.file.status = fr.status
-
-                self.db.add(*[fr.file for fr in result.files])
-            else:
-                # If task incomplete, just mark that it was updated
-                self.db.add(transfer)
-
-    async def download2(
-            self,
-            transfer_client: TransferClient,
-            show_progress: bool = True,
-    ) -> None:
-
-        # Recheck list of files eligible for download
-        await self.check_globus_transfers(transfer_client)
-
-        # --- Step 1: Load eligible files ---
-        queue: Sequence[File] = self.db.scalars(sql.file.ready_for_download())
-        if not queue:
-            return
-
-        # --- Step 2: Partition by transfer method ---
-        by_url, by_globus = partition_by_transfer_method(queue)
-
-        # --- Step 3: Create tasks ---
-        # NOTE: make_https_tasks does not currently forward config values
-        # (chunk_size, disable_ssl, disable_checksum, http_timeout) to
-        # HttpsDownloadTask. Those should be passed from self.config.download.
-        https_tasks = make_https_tasks(list(by_url), self)
-
-        # The on_start callback that persists a GlobusTransfer record to the DB
-        # is already registered inside make_globus_tasks (_make_globus_on_start).
-        # --- Step 4: (Globus on_start for DB record — wired in make_globus_tasks) ---
-        if by_globus and transfer_client is None:
-            logger.warning(
-                f"{sum(len(v) for v in by_globus.values())} file(s) require Globus "
-                "but no transfer_client was provided; they will be skipped."
-            )
-        globus_tasks = (
-            make_globus_tasks(by_globus, self, transfer_client)
-            if by_globus and transfer_client is not None
-            else []
-        )
-
-        # --- Step 5: Create orchestrator; register on_start callback ---
-        orchestrator = Orchestrator(
-            max_concurrent_local=self.config.download.max_concurrent,
-        )
-
-        def _on_task_start(start_info: TaskStartEvent) -> None:
-            # Transition files that will actually be downloaded to Started,
-            # meaning the task has been dequeued and begun executing.
-            # already_done files (found at DRS path during pre_check) are left
-            # in their current DB state; the result handler will mark them Done.
-            if not start_info.files:
-                return
-            for file in start_info.files:
-                file.status = FileStatus.Started
-            self.db.add(*start_info.files)
-
-        orchestrator.on_task_start(_on_task_start)
-
-        # --- Step 6: Enqueue tasks; mark files as Starting ---
-        # Starting means the task has been submitted to the orchestrator but has
-        # not yet been dequeued by a worker. The on_start callback above will
-        # advance files to Started once the task actually begins executing.
-        all_enqueued: list[File] = []
-        for task in https_tasks:
-            orchestrator.add_local_task(task)
-            all_enqueued.extend(task._files)
-        for gtask in globus_tasks:
-            orchestrator.add_remote_task(gtask)
-            all_enqueued.extend(gtask._files)
-
-        for file in all_enqueued:
-            file.status = FileStatus.Starting
-        if all_enqueued:
-            self.db.add(*all_enqueued)
-
-        # --- Step 7: Run tasks and persist final file statuses ---
-        # Batching writes: accumulate file updates and flush every _BATCH_SIZE
-        # items to avoid one commit per file for large downloads.
-        # NOTE: GlobusTransfer objects are included in the batch alongside Files;
-        # db.add() accepts any Table subtype so mixing them is safe at runtime,
-        # though the TypeVar signature only expresses a single homogeneous type.
-        _BATCH_SIZE = 50
-        pending: list[File | GlobusTransfer] = []
-
-        def _process_result(result: TaskResultEvent) -> None:
-            for fr in result.files:
-                fr.file.status = fr.status
-                pending.append(fr.file)
-            # FIXME: refactor this part to a separate globus task callback
-            # For Globus tasks: update the GlobusTransfer record created at start.
-            # NOTE: result.end_time is set when the TaskResult dataclass is
-            # instantiated (after polling completes), not from the Globus API's
-            # own completion_time field. A more accurate value would require
-            # surfacing the API's completion_time through GlobusTaskResult.
-            # if isinstance(result, GlobusTaskResult):
-            #     transfer = self.db.session.get(GlobusTransfer, result.globus_task_id)
-            #     if transfer is not None:
-            #         transfer.status = result.globus_task_status
-            #         transfer.last_updated = datetime.now(timezone.utc)
-            #         transfer.completion_time = result.end_time
-            #         pending.append(transfer)
-
-        try:
-            async for result in orchestrator.iter_results():
-                _process_result(result)
-                if len(pending) >= _BATCH_SIZE:
-                    self.db.add(*pending)
-                    pending.clear()
-
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            # Collect cancel results for tasks that were mid-run or never started.
-            # Each task defines its own to_cancel() behavior, so no task-type
-            # discrimination is needed here.
-            for result in await orchestrator.collect_cancels():
-                _process_result(result)
-            raise
-
-        finally:
-            if pending:
-                self.db.add(*pending)
-
 
     def replace_queries(
         self,
