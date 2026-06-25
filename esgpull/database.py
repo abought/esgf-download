@@ -66,10 +66,15 @@ class Database:
         migrations_path = Path(__file__).parent / "migrations"
         alembic_config.set_main_option("script_location", str(migrations_path))
         alembic_config.attributes["connection"] = self._engine
+        script = ScriptDirectory.from_config(alembic_config)
+        head = script.get_current_head()
         with self._engine.begin() as conn:
             opts = {"version_table": "version"}
             ctx = MigrationContext.configure(conn, opts=opts)
             self.version = ctx.get_current_revision()
+        if head is not None and self.version != head:
+            alembic.command.upgrade(alembic_config, head)
+            self.version = head
         if "+dev" not in __version__ and self.version != __version__:
             alembic.command.revision(
                 alembic_config,
@@ -77,11 +82,7 @@ class Database:
                 autogenerate=True,
                 rev_id=__version__,
             )
-        script = ScriptDirectory.from_config(alembic_config)
-        head = script.get_current_head()
-        if head is not None and self.version != head:
-            alembic.command.upgrade(alembic_config, head)
-            self.version = head
+            self.version = __version__
 
     @property
     @contextmanager
