@@ -77,7 +77,7 @@ class Db(BaseModel, validate_assignment=True):
 
 
 class Download(BaseModel, validate_assignment=True):
-    chunk_size: int = 1 << 26
+    chunk_size: int = 1 << 23  # 8 MiB
     http_timeout: int = 20
     max_concurrent: int = 5
     disable_ssl: bool = False
