@@ -32,7 +32,7 @@ class FakeExtraHeartbeatTask(FakeExtraTask):
 
     async def _run(self, to_download, skip):
         self._emit_heartbeat(1, 0)
-        return self._make_result(TaskStatus.SUCCESS, "ok", [])
+        return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
 
 class FakeMutableExtraTask(FakeDownloadTask):
@@ -53,7 +53,7 @@ class FakeMutableHeartbeatTask(FakeMutableExtraTask):
         self._emit_heartbeat(1, 0)
         self.extra_value = "second"
         self._emit_heartbeat(2, 0)
-        return self._make_result(TaskStatus.SUCCESS, "ok", [])
+        return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +134,7 @@ class TestRunEventSequence:
         class HeartbeatTask(FakeDownloadTask):
             async def _run(self, to_download, skip):
                 self._emit_heartbeat(1, 512)
-                return self._make_result(TaskStatus.SUCCESS, "ok", [])
+                return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
         task = HeartbeatTask("t", [make_file(size=512)])
         cb = MagicMock()
@@ -151,7 +151,7 @@ class TestRunEventSequence:
                 self._emit_heartbeat(1, 100)
                 self._emit_heartbeat(2, 200)
                 self._emit_heartbeat(3, 300)
-                return self._make_result(TaskStatus.SUCCESS, "ok", [])
+                return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
         task = MultiHeartbeatTask("t", [make_file(size=300)])
         cb = MagicMock()
@@ -228,7 +228,7 @@ class TestHeartbeatEventFields:
         class SingleHeartbeatTask(FakeDownloadTask):
             async def _run(self, to_download, skip):
                 self._emit_heartbeat(3, 512)
-                return self._make_result(TaskStatus.SUCCESS, "ok", [])
+                return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
         files = [make_file(size=100, file_id="a"), make_file(size=200, file_id="b")]
         task = SingleHeartbeatTask("hb-label", files)
@@ -314,7 +314,7 @@ class TestToFail:
         class CapturingTask(FakeDownloadTask):
             async def _run(self, to_download, skip):
                 captured.append(self.to_fail())
-                return self._make_result(TaskStatus.SUCCESS, "ok", [])
+                return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
         skip = [FileResult(FileStatus.Done, f_done)]
         task = CapturingTask("t", [f_inflight, f_done], pre_check_result=([f_inflight], skip))

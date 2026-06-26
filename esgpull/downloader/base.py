@@ -15,7 +15,7 @@ from esgpull.models.file import FileStatus
 class TaskStatus(enum.IntEnum):
     ACTIVE = 0
     CANCELED = 1
-    SUCCESS = 2
+    COMPLETE = 2
     FAIL = 3
     UNKNOWN = 4  # status could not be determined due to transient issues
 

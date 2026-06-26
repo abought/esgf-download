@@ -165,7 +165,7 @@ class TestWorkerExceptionHandling:
         results = asyncio.run(collect(orch))
         by_label = {r.task_label: r.status for r in results}
         assert by_label["fail"] == TaskStatus.FAIL
-        assert by_label["ok"] == TaskStatus.SUCCESS
+        assert by_label["ok"] == TaskStatus.COMPLETE
 
 
 class TestConcurrency:
@@ -181,7 +181,7 @@ class TestConcurrency:
                     peak = max(peak, concurrent)
                     await asyncio.sleep(0)  # yield so both workers can start their tasks
                     concurrent -= 1
-                    return self._make_result(TaskStatus.SUCCESS, "ok", [])
+                    return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
             orch = Orchestrator(max_concurrent_local=2)
             for i in range(5):
@@ -235,7 +235,7 @@ class TestCollectCancels:
                 async def _run(self, to_download, skip):
                     started.set()
                     await asyncio.sleep(3600)  # blocks until cancelled
-                    return self._make_result(TaskStatus.SUCCESS, "ok", [])
+                    return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
             orch = Orchestrator()
             orch.add_local_task(BlockingTask("t", [make_file()]))
@@ -262,7 +262,7 @@ class TestCollectCancels:
                 async def _run(self, to_download, skip):
                     started.set()
                     await asyncio.sleep(3600)
-                    return self._make_result(TaskStatus.SUCCESS, "ok", [])
+                    return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
             orch = Orchestrator(max_concurrent_local=1)
             orch.add_local_task(BlockingTask("in-flight", [make_file(file_id="a")]))

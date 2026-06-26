@@ -139,7 +139,7 @@ class TestGlobusTransferTask:
             wait_until_resolved=True
         )
         result = asyncio.run(task.run())
-        assert result.status == TaskStatus.SUCCESS
+        assert result.status == TaskStatus.COMPLETE
 
         assert all(fr.status == FileStatus.Done for fr in result.files)
 
@@ -224,7 +224,7 @@ class TestGlobusStatusTask:
             wait_until_resolved=True
         )
         result = asyncio.run(task.run())
-        assert result.status == TaskStatus.SUCCESS
+        assert result.status == TaskStatus.COMPLETE
 
         assert all(fr.status == FileStatus.Done for fr in result.files)
 
@@ -340,7 +340,7 @@ class TestGlobusStatusTask:
         )
         with patch("asyncio.sleep", new_callable=AsyncMock):
             result = asyncio.run(task.run())
-        assert result.status == TaskStatus.SUCCESS
+        assert result.status == TaskStatus.COMPLETE
         assert len(responses_lib.calls) == 3
 
     def test_sleep_called_between_polls(self, client):
@@ -533,7 +533,7 @@ class TestGlobusStatusTask:
             wait_until_resolved=True
         )
         result = asyncio.run(task.run())
-        assert result.status == TaskStatus.SUCCESS
+        assert result.status == TaskStatus.COMPLETE
 
         by_id = {fr.file.file_id: fr.status for fr in result.files}
         assert by_id["missing"] == FileStatus.Error

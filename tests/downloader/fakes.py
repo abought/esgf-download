@@ -67,7 +67,7 @@ class FakeDownloadTask(DownloadTask):
             raise self._raise_on_run
         if self._run_result is not None:
             return self._run_result
-        return self._make_result(TaskStatus.SUCCESS, "ok", [])
+        return self._make_result(TaskStatus.COMPLETE, "ok", [])
 
     async def _cleanup(self, result: TaskResultEvent) -> TaskResultEvent:
         return result
@@ -81,4 +81,4 @@ class FakeHeartbeatTask(FakeDownloadTask):
 
     async def _run(self, to_download, skip):
         self._emit_heartbeat(1, 0)
-        return self._make_result(TaskStatus.SUCCESS, "ok", [])
+        return self._make_result(TaskStatus.COMPLETE, "ok", [])

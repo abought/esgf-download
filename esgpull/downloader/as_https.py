@@ -130,11 +130,11 @@ class HttpsDownloadTask(DownloadTask):
                     files_completed += 1
                     self._emit_heartbeat(files_completed, bytes_completed)
 
-        except Exception:
+        except Exception as e:
             logger.exception(f"Task-level failure in task {self._task_label}")
-            return self.to_fail("Task-level failure during download")
+            return self.to_fail(str(e))
 
-        return self._make_result(TaskStatus.SUCCESS, 'Download complete', results)
+        return self._make_result(TaskStatus.COMPLETE, 'Download complete', results)
 
     async def _cleanup(self, result: TaskResultEvent) -> TaskResultEvent:
         """

@@ -134,7 +134,7 @@ class TestRunHappyPath:
         assert result.files[0].file is file
 
     def test_task_result_is_always_success(self, fs):
-        """run() always returns TaskStatus.SUCCESS; per-file errors live in result.files."""
+        """run() always returns TaskStatus.COMPLETE; per-file errors live in result.files."""
         file = make_file()
         task = HttpsDownloadTask(
             "t", [file], fs=fs,
@@ -142,7 +142,7 @@ class TestRunHappyPath:
             disable_checksum=True,
         )
         result = asyncio.run(task.run())
-        assert result.status == TaskStatus.SUCCESS
+        assert result.status == TaskStatus.COMPLETE
 
     def test_part_file_absent_after_successful_run(self, fs):
         content = b"data"
@@ -365,7 +365,7 @@ class TestCleanup:
         return HttpsDownloadTask("t", [], fs=fs)
 
     def _result(self, file, status):
-        return TaskResultEvent("t", TaskStatus.SUCCESS, "ok", [FileResult(status, file)], {}, None)
+        return TaskResultEvent("t", TaskStatus.COMPLETE, "ok", [FileResult(status, file)], {}, None)
 
     def test_done_file_moved_to_drs(self, fs):
         content = b"data"
@@ -402,7 +402,7 @@ class TestCleanup:
         asyncio.run(self._task(fs)._cleanup(self._result(file, FileStatus.Error)))
 
     def test_returns_same_result_object(self, fs):
-        result = TaskResultEvent("t", TaskStatus.SUCCESS, "ok", [], {}, None)
+        result = TaskResultEvent("t", TaskStatus.COMPLETE, "ok", [], {}, None)
         returned = asyncio.run(self._task(fs)._cleanup(result))
         assert returned is result
 
