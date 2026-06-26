@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import errno
+import os
+import shutil
 import ssl
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 import contextlib
 
@@ -17,10 +20,30 @@ from esgpull.downloader.base import (
     FileResult,
     TaskResultEvent, TaskStatus,
 )
+from esgpull.exceptions import InsufficientDiskSpace
 from esgpull.models.file import FileStatus
 from esgpull.downloader.fs import Digest, Filesystem
 from esgpull.models import File
 from esgpull.tui import logger
+from esgpull.utils import format_size
+
+
+def check_disk_space(files: list[File], fs: Filesystem) -> None:
+    """
+    Preflight check: ensure enough free space exists for `files`. Used for downloading to a local filesystem.
+
+    `tmp` and `data` may be different filesystems (see `Filesystem.move_to_drs`'s
+    fallback-to-copy handling), so both are checked; they're deduplicated by
+    device id in case they share a filesystem.
+    """
+    needed = sum(file.size for file in files)
+    devices: dict[int, Path] = {}
+    for path in (fs.paths.tmp, fs.paths.data):
+        devices[os.stat(path).st_dev] = path
+    for path in devices.values():
+        free = shutil.disk_usage(path).free
+        if free < needed:
+            raise InsufficientDiskSpace(path, format_size(needed), format_size(free))
 
 
 def _make_ssl_context(disable_ssl: bool) -> ssl.SSLContext | bool:
@@ -51,7 +74,7 @@ class HttpsDownloadTask(DownloadTask):
         files: list[File],
         # URL-specific options
         fs: Filesystem,
-        chunk_size: int = 1024 * 1024,
+        chunk_size: int = 1 << 23,  # 8 MiB
         disable_checksum: bool = False,
         disable_ssl: bool = False,
         http_timeout: float = 120.0,

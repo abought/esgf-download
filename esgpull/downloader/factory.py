@@ -6,12 +6,14 @@ from typing import TYPE_CHECKING
 
 from esgpull.downloader.as_globus import GlobusTransferTask
 from esgpull.downloader.as_https import HttpsDownloadTask
+from esgpull.downloader.orchestrator import Orchestrator
 from esgpull.models import File
 from esgpull.models.globus_transfer import GlobusTransfer, GlobusTransferStatus
 
 if TYPE_CHECKING:
     from globus_sdk import TransferClient
     from esgpull.esgpull import Esgpull
+    from esgpull.downloader.ui import HttpsDownloadUI
 
 
 def partition_by_transfer_method(files: Sequence[File]) -> tuple[list[File], dict[str, list[File]]]:
@@ -41,10 +43,34 @@ def make_https_tasks(files: list[File], app: 'Esgpull') -> list[HttpsDownloadTas
     A separate task per file allows the orchestrator's worker pool to
     download multiple files in parallel.
     """
+    cfg = app.config.download
     return [
-        HttpsDownloadTask(task_label=file.file_id, files=[file], fs=app.fs)
+        HttpsDownloadTask(
+            task_label=file.file_id,
+            files=[file],
+            fs=app.fs,
+            chunk_size=cfg.chunk_size,
+            disable_checksum=cfg.disable_checksum,
+            disable_ssl=cfg.disable_ssl,
+            http_timeout=cfg.http_timeout,
+        )
         for file in files
     ]
+
+
+def add_https_tasks(
+    orch: Orchestrator,
+    files: list[File],
+    app: 'Esgpull',
+    ui: 'HttpsDownloadUI',
+) -> None:
+    """
+    Prepare url-based downloads and add appropriate callbacks
+    """
+    for task in make_https_tasks(files, app):
+        orch.add_local_task(task)
+    orch.on_task_start(ui.on_start)
+    orch.on_heartbeat(ui.on_heartbeat)
 
 
 def make_globus_tasks(

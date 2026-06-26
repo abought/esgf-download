@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import errno
 import logging
+import os
+import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,9 +29,19 @@ from rich.progress import (
 from esgpull.config import Config
 from esgpull.context import Context
 from esgpull.database import Database
-from esgpull.downloader.as_https import DownloadCtx
+from esgpull.downloader.as_https import DownloadCtx, check_disk_space
+from esgpull.downloader.base import (
+    StartCallback,
+    TaskResultEvent,
+    TaskStartEvent,
+    TaskStatus,
+)
+from esgpull.downloader.factory import add_https_tasks
+from esgpull.downloader.orchestrator import Orchestrator
+from esgpull.downloader.ui import HttpsDownloadUI
 from esgpull.exceptions import (
     DownloadCancelled,
+    InsufficientDiskSpace,
     InvalidInstallPath,
     NoInstallPath,
     UnknownDefaultQueryID,
@@ -56,6 +70,70 @@ from esgpull.downloader.pipeline import Processor
 from esgpull.result import Err, Ok, Result
 from esgpull.tui import UI, DummyLive, ErrorCountColumn, Verbosity, logger
 from esgpull.utils import format_size
+
+
+def _track_file_state(db: Database, file: File, status: FileStatus, use_db: bool) -> None:
+    file.status = status
+    if use_db:
+        db.add(file)
+
+
+def _process_task_result(
+    db: Database,
+    event: TaskResultEvent,
+    use_db: bool,
+) -> list[Err]:
+    """
+    When a download task completes, immediately update the DB state for that file
+    Apply one orchestrator result to the DB; return Errs for any non-done files.
+
+    NOTE: a task can finish with `TaskStatus.COMPLETE` even if one or all of its files failed.
+        The database should reflect `File.Status` for each file in the task separately.
+    """
+    errors: list[Err] = []
+    for fr in event.files:
+        match fr.status:
+            case FileStatus.Done:
+                _track_file_state(db, fr.file, FileStatus.Done, use_db)
+            case FileStatus.Cancelled:
+                _track_file_state(db, fr.file, FileStatus.Cancelled, use_db)
+            case FileStatus.Error:
+                _track_file_state(db, fr.file, FileStatus.Error, use_db)
+                errors.append(Err(fr.file, RuntimeError(event.msg)))
+            case _:
+                # This is essentially a state machine. If the task is not in an expected starting state,
+                #   it may indicate conflicts from another running esgpull process.
+                raise RuntimeError(
+                    f"Unexpected file status {fr.status!r} in completed task result"
+                    f" for {fr.file.file_id} — halting downloads."
+                    f" This may indicate a bug in the task implementation or external data corruption."
+                )
+    return errors
+
+
+def _make_on_task_start(db: Database, use_db: bool) -> StartCallback:
+    def on_start(event: TaskStartEvent) -> None:
+        for file in event.files:
+            _track_file_state(db, file, FileStatus.Starting, use_db)
+        for fr in event.already_done:
+            _track_file_state(db, fr.file, FileStatus.Done, use_db)
+
+    return on_start
+
+
+async def _drain_cancels(db: Database, orch: Orchestrator, use_db: bool) -> list[Err]:
+    """
+    If the program terminates early, mark files as canceled. Primarily used by download-as-url tasks,
+        where program termination immediately ends the download.
+    """
+    errors: list[Err] = []
+    for event in await orch.collect_cancels():
+        errors += _process_task_result(db, event, use_db)
+    return errors
+
+
+def _is_disk_full(event: TaskResultEvent) -> bool:
+    return event.status == TaskStatus.FAIL and os.strerror(errno.ENOSPC) in event.msg
 
 
 @dataclass(repr=False)
@@ -327,6 +405,7 @@ class Esgpull:
         task_ids: dict[str, TaskID],
         live: Live | DummyLive,
     ) -> AsyncIterator[Result[DownloadCtx]]:
+        """Used by legacy download functionality"""
         async for result in processor.process():
             task_idx = progress.task_ids.index(task_ids[result.data.file.sha])
             task = progress.tasks[task_idx]
@@ -504,6 +583,54 @@ class Esgpull:
                     errors.append(Err(file, DownloadCancelled()))
                 if use_db:
                     self.db.add(*cancelled)
+        return files, errors
+
+    async def download2_https(
+        self,
+        queue: list[File],  # TODO: Design q. Consider revisiting how eligible files are dwetermined in replicator (cron) mode. Do we want to exclude canceled files until `esgpull retry` is run? Does that make sense for a hands-off process?
+        use_db: bool = True,
+        show_progress: bool = True,
+    ) -> tuple[list[File], list[Err]]:
+        """
+        Download a series of files from a URL to a local filesystem
+        """
+        # Stop immediately if disk does not have enough space for the required downloads.
+        check_disk_space(queue, self.fs)
+        ui = HttpsDownloadUI(
+            self.ui,
+            len(queue),
+            self.config.download.show_filename,
+            show_progress,
+        )
+        # Eventually, both URL-based files and globus downloads will use the same orchestrator
+        orch = Orchestrator(max_concurrent_local=self.config.download.max_concurrent)
+        add_https_tasks(orch, queue, self, ui)
+        orch.on_task_start(_make_on_task_start(self.db, use_db))
+
+        files: list[File] = []
+        errors: list[Err] = []
+        gen = orch.iter_results()
+        try:
+            with ui.live():
+                async for event in gen:
+                    errors += _process_task_result(self.db, event, use_db)
+                    files += [
+                        fr.file for fr in event.files if fr.status == FileStatus.Done
+                    ]
+                    ui.on_result(event)
+                    if _is_disk_full(event):
+                        await gen.aclose()
+                        errors += await _drain_cancels(self.db, orch, use_db)
+                        needed = sum(file.size for file in queue)
+                        free = shutil.disk_usage(self.fs.paths.data).free
+                        raise InsufficientDiskSpace(
+                            self.fs.paths.data,
+                            format_size(needed),
+                            format_size(free),
+                        )
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            errors += await _drain_cancels(self.db, orch, use_db)
+            raise
         return files, errors
 
     def replace_queries(

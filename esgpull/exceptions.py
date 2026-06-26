@@ -168,3 +168,7 @@ class AlreadyInstalledName(InstallException):
     msg = """{name}
 {msg}
 """
+
+
+class InsufficientDiskSpace(EsgpullException):
+    msg = "Not enough free space on {}: need {}, have {}."

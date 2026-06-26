@@ -1,15 +1,12 @@
 import asyncio
-import sys
 
 import click
 import rich
 from click.exceptions import Abort, Exit
 
-if sys.version_info < (3, 11):
-    from exceptiongroup import BaseExceptionGroup
-
 from esgpull.cli.decorators import args, opts
 from esgpull.cli.utils import get_queries, init_esgpull, valid_name_tag
+from esgpull.exceptions import InsufficientDiskSpace
 from esgpull.models import File, FileStatus
 from esgpull.tui import Verbosity, logger
 from esgpull.utils import format_size
@@ -60,15 +57,33 @@ def download(
         if not queue:
             rich.print("Download queue is empty.")
             esg.ui.raise_maybe_record(Exit(0))
-        coro = esg.download(queue, show_progress=not quiet)
-        files, errors = asyncio.run(coro)
+        try:
+            coro = esg.download2_https(queue, show_progress=not quiet)
+            files, errors = asyncio.run(coro)
+        except InsufficientDiskSpace as exc:
+            # Local system problem (lockfile conflict / disk full), not a
+            # remote-server issue: alert a sysadmin distinctly from per-file
+            # download failures.
+            logger.error(str(exc))
+            esg.ui.raise_maybe_record(Exit(2))
+            return
         if files:
             size = format_size(sum(file.size for file in files))
             esg.ui.print(
                 f"Downloaded {len(files)} new files for a total size of {size}"
             )
+        # TODO: revisit — currently logs all results after the fact; consider
+        #   logging each file outcome as it completes (via a result callback),
+        #   so that we can track partial progress if a download is interrupted
         if errors:
             logger.error(f"{len(errors)} files could not be installed.")
-            exc_group = BaseExceptionGroup("Download", [e.err for e in errors])
-            esg.ui.raise_maybe_record(exc_group)
+            for err in errors:
+                logger.error(
+                    f"  {err.data.filename} [{err.data.data_node}]"
+                    f" [{err.data.status.name}]: {err.err}"
+                )
+            # Some failures: likely a transient remote-server issue (exit 1).
+            # All failures: likely a local system/usage problem (exit 2).
+            exit_code = 1 if files else 2
+            esg.ui.raise_maybe_record(Exit(exit_code))
         esg.ui.raise_maybe_record(Exit(0))
