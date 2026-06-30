@@ -155,7 +155,7 @@ class HttpsDownloadTask(DownloadTask):
 
         except Exception as e:
             logger.exception(f"Task-level failure in task {self._task_label}")
-            return self.to_fail(str(e))
+            return self.to_fail(str(e), exception=e)
 
         return self._make_result(TaskStatus.COMPLETE, 'Download complete', results)
 
@@ -174,9 +174,9 @@ class HttpsDownloadTask(DownloadTask):
                     for path in (file_path.done, file_path.tmp):
                         if path.is_file():
                             path.unlink()
-        except Exception:
+        except Exception as e:
             logger.exception(f"Filesystem error during cleanup for task {self._task_label}")
-            return self.to_fail("Filesystem error during cleanup")
+            return self.to_fail("Filesystem error during cleanup", exception=e)
         return result
 
 

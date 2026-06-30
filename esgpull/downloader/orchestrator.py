@@ -59,10 +59,10 @@ class Orchestrator:
             except Exception as err:
                 # Unhandled conditions should mark everything in the task as failed
                 logging.exception('An unknown error occurred')
-                failure = task.to_fail(str(err))
+                failure = task.to_fail(str(err), exception=err)
                 self._task_results.put_nowait(failure)
             except BaseException as err:
-                failure = task.to_fail(str(err))
+                failure = task.to_fail(str(err), exception=err)
                 self._task_results.put_nowait(failure)
                 raise
             finally:

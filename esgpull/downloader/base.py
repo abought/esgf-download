@@ -47,6 +47,7 @@ class TaskResultEvent:
 
     start_time: Optional[datetime]  # blank if task canceled before start
     end_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    exception: Optional[BaseException] = field(default=None)
 
 ResultCallback = Callable[[TaskResultEvent], None]
 
@@ -144,14 +145,15 @@ class DownloadTask(ABC):
         for callback in self._start_callbacks:
             callback(event)
 
-    def _make_result(self, status: TaskStatus, msg, file_results: list[FileResult]):
+    def _make_result(self, status: TaskStatus, msg, file_results: list[FileResult], exception: Optional[BaseException] = None):
         return TaskResultEvent(
             self._task_label,
             status,
             msg,
             file_results,
             self._get_extra(),
-            self._start_time
+            self._start_time,
+            exception=exception,
         )
 
     def _emit_result(self, event: TaskResultEvent):
@@ -165,19 +167,18 @@ class DownloadTask(ABC):
         """
         raise NotImplementedError
 
-    def to_unknown(self, msg: str = "Transfer status could not be determined") -> TaskResultEvent:
+    def to_unknown(self, msg: str = "Transfer status could not be determined", exception: Optional[BaseException] = None) -> TaskResultEvent:
         items = self._to_download or self._files
         fr = [FileResult(FileStatus.Started, f) for f in items]
-        return self._make_result(TaskStatus.UNKNOWN, msg, fr)
+        return self._make_result(TaskStatus.UNKNOWN, msg, fr, exception=exception)
 
-    def to_fail(self, msg: str = "An unknown error occurred") -> TaskResultEvent:
+    def to_fail(self, msg: str = "An unknown error occurred", exception: Optional[BaseException] = None) -> TaskResultEvent:
         """
-        Helper method for unhandled exceptions: task result should convey a failed file result for all files
+        The task definitively failed. All files are marked Error.
         """
         items = self._to_download or self._files
-
         fr = FileResult.fail_all(items)
-        return self._make_result(TaskStatus.FAIL, msg, fr)
+        return self._make_result(TaskStatus.FAIL, msg, fr, exception=exception)
 
     ########
     # Critical steps of the task lifecycle
@@ -249,6 +250,11 @@ class DownloadTask(ABC):
         if callback not in self._start_callbacks:
             self._start_callbacks.append(callback)
 
+    def _forward_heartbeats_to(self, other: 'DownloadTask') -> None:
+        """Forward this task's heartbeat listeners to a delegated sub-task."""
+        for cb in self._heartbeat_callbacks:
+            other.on_heartbeat(cb)
+
     # Task processing
     async def run(self) -> TaskResultEvent:
         """
@@ -267,7 +273,7 @@ class DownloadTask(ABC):
         except Exception as e:
             # Nothing was actually started (eg the remote service rejected submission), so there's
             # no start event to emit. Report it the same way the orchestrator's own catch-all would.
-            final = await self._cleanup(self.to_fail(str(e)))
+            final = await self._cleanup(self.to_fail(str(e), exception=e))
             self._emit_result(final)
             return final
 

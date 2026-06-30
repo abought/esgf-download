@@ -129,7 +129,7 @@ class GlobusStatusTask(GlobusTaskCommon):
                 logger.error(
                     "Globus task %s not found — transfer can never be resolved", self._transfer_task_id
                 )
-                return self.to_fail(f"Globus task {self._transfer_task_id} not found")
+                return self.to_fail(f"Globus task {self._transfer_task_id} not found", exception=e)
             if e.http_status in (401, 403):
                 logger.error(
                     "Globus authorization error (%s) for task %s — re-authentication required",
@@ -137,10 +137,10 @@ class GlobusStatusTask(GlobusTaskCommon):
                 )
             else:
                 logger.warning("Globus API error (%s) checking task %s", e.http_status, self._transfer_task_id)
-            return self.to_unknown(f"Globus API error ({e.http_status})")
+            return self.to_unknown(f"Globus API error ({e.http_status})", exception=e)
         else:
             logger.warning("Globus API unreachable checking task %s: %s", self._transfer_task_id, e)
-            return self.to_unknown("Globus API unreachable")
+            return self.to_unknown("Globus API unreachable", exception=e)
 
     async def _run(self, to_download: list[File], skip: list[FileResult], **kwargs) -> TaskResultEvent:
         try:
@@ -188,7 +188,7 @@ class GlobusTransferTask(GlobusTaskCommon):
         dest_root_path: Optional[str] = None,
 
         wait_until_resolved: bool = True,
-        poll_time: int = 60,
+        poll_time_max: int = 60,
     ) -> None:
         super().__init__(task_label, files, client)
 
@@ -197,7 +197,7 @@ class GlobusTransferTask(GlobusTaskCommon):
         self._dest_root_path = dest_root_path
 
         self._wait_until_resolved = wait_until_resolved
-        self._poll_time = poll_time
+        self._poll_time_max = poll_time_max
 
     def _make_transfer_data(self, files: 'list[File]') -> TransferData:
         assert self._source_collection_id is not None
@@ -245,6 +245,7 @@ class GlobusTransferTask(GlobusTaskCommon):
             self._client,
             self._transfer_task_id,
             self._wait_until_resolved,
-            self._poll_time
+            self._poll_time_max
         )
+        self._forward_heartbeats_to(proxy)
         return await proxy.run()
