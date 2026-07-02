@@ -9,7 +9,7 @@ The new system introduces a shared abstraction, and separation of concerns to ma
 ## Plan of work
 Phase 1: Refactor existing HTTPS / url based download functionality (`esgpull.py:download()`). See [spec](design/download_refactor/download_https_conversion.md)
 Phase 2: Introduce a separate path for globus-based downloads ([spec](design/download_refactor/download_globus_transfer.md))
-Phase 3: Unify these into a new single download method
+Phase 3: Unify these into a new single download method ([spec](design/download_refactor/download-combined.md))
 Phase 4: Reconcile design changes with prior `download` function, and validate using a mix of manual and automated strategies
 Phase 5: Clean up PR, and merge final version in
 

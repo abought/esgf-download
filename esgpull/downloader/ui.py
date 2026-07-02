@@ -23,12 +23,11 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-from esgpull.downloader.base import TaskResultEvent, TaskStartEvent, TaskHeartbeatEvent
+from esgpull.downloader.base import TaskResultEvent, TaskStartEvent, TaskHeartbeatEvent, TaskStatus
 from esgpull.models import File, FileStatus
 from esgpull.models.utils import short_sha
 from esgpull.tui import UI, DummyLive, ErrorCountColumn, logger
 from esgpull.utils import format_size
-
 
 class HttpsDownloadUI:
     """Progress bar UI for a group of url-based file downloads"""
@@ -45,6 +44,7 @@ class HttpsDownloadUI:
         self._show_progress = show_progress
 
         self.main_progress = ui.make_progress(
+            TextColumn("(direct download)"),
             SpinnerColumn(),
             MofNCompleteColumn(),
             TimeRemainingColumn(compact=True, elapsed_when_finished=True),
@@ -148,6 +148,96 @@ class HttpsDownloadUI:
     def live(self) -> Iterator[Live | DummyLive]:
         with self._app_ui.live(
             self.file_progress,
+            self.main_progress,
+            disable=not self._show_progress,
+        ) as live:
+            self._live = live
+            try:
+                yield live
+            finally:
+                self._live = None
+
+
+class GlobusDownloadUI:
+    """Progress bar UI for a group of Globus transfer tasks (one per source collection)."""
+
+    def __init__(
+        self,
+        ui: UI,
+        queue_size: int,  # number of GlobusTransferTasks (one per collection)
+        show_task_bars: bool,  # show per-collection progress bars; False when not waiting for completion
+        show_progress: bool = True,
+    ) -> None:
+        self._app_ui = ui
+        self._show_task_bars = show_task_bars
+        self._show_progress = show_progress
+
+        self.main_progress = ui.make_progress(
+            TextColumn("(globus transfers)"),
+            SpinnerColumn(),
+            MofNCompleteColumn(),
+            ErrorCountColumn(),
+        )
+        # Note: Per-task bars track file counts, not bytes
+        self.task_progress = ui.make_progress(
+            TextColumn("(globus collection) [cyan]{task.fields[collection_id]}[/cyan]"),
+            "[progress.percentage]{task.percentage:>3.0f}%",
+            BarColumn(),
+            "·",
+            MofNCompleteColumn(),
+            transient=True,
+        )
+
+        self._task_ids: dict[str, TaskID] = {}
+        self._nb_errors = 0
+        self._queue_remaining = queue_size
+        self._main_task_id = self.main_progress.add_task("", total=queue_size, nb_errors=0)
+        self._live: Live | DummyLive | None = None
+
+    def on_start(self, event: TaskStartEvent) -> None:
+        if not self._show_task_bars:
+            return
+        task_id = self.task_progress.add_task(
+            "",
+            total=len(event.files),
+            completed=0,
+            collection_id=event.task_label,
+        )
+        self._task_ids[event.task_label] = task_id
+
+    def on_heartbeat(self, event: TaskHeartbeatEvent) -> None:
+        task_id = self._task_ids.get(event.task_label)
+        if task_id is not None:
+            self.task_progress.update(task_id, completed=event.n_files_completed)
+
+    def on_result(self, event: TaskResultEvent) -> None:
+        task_id = self._task_ids.pop(event.task_label, None)
+        if task_id is not None:
+            self.task_progress.remove_task(task_id)
+
+        if event.status in (TaskStatus.COMPLETE, TaskStatus.ACTIVE):
+            self.main_progress.update(self._main_task_id, advance=1)
+            if self._live is not None:
+                n_files = len(event.files)
+                if event.status == TaskStatus.ACTIVE:
+                    msg = f"[cyan]{event.task_label}[/] — {n_files} file(s) submitted to Globus"
+                else:
+                    n_done = sum(1 for fr in event.files if fr.status == FileStatus.Done)
+                    msg = f"[cyan]{event.task_label}[/] — {n_done}/{n_files} file(s) transferred"
+                self._live.console.print(msg)
+        else:
+            self._nb_errors += 1
+            self._queue_remaining -= 1
+            self.main_progress.update(
+                self._main_task_id,
+                total=self._queue_remaining,
+                nb_errors=self._nb_errors,
+            )
+
+    @contextlib.contextmanager
+    def live(self) -> Iterator[Live | DummyLive]:
+        with self._app_ui.live(
+            self.task_progress,
             self.main_progress,
             disable=not self._show_progress,
         ) as live:

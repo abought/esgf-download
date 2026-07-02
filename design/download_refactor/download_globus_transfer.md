@@ -42,5 +42,11 @@ Do not attempt to show estimated time remaining, because globus transfer tasks m
 ### Logging and monitoring
 * Exit with code 2 (program-level issue) if globus authentication fails, or any transfer fails with a permission error. (this is because we expect source to be public, and a permissions error implies issue with the dest source collection, or the user's credentials on the dest)
 
+### Check existing globus tasks
+Once before download begins, we should fetch a list of eligible (non-resolved) globus transfers, and check them once (no polling) for current status. Tasks that are not found should be reported as permanently failed.
+
+## Testing fixtures
+We do not yet have a real way of populating the DB with globus storage references. Create a dummy script in the `design_download_refactor.py` folder that allows generating database entries for new files with globus access available. It should connect to the user's configured esgpull database. Assume it configures two files (`valid_file` and `error_file`) within a single source collection. To facilitate repeat testing with dummy data, this script should be able to detect if the sample files already exist, and reset their status to download-eligible if so.
+
 ## Future work
 * Before the list of eligible files is computed, we need an additional function to check all existing globus transfer status, and update accordingly.

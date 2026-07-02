@@ -34,6 +34,7 @@ def retry(
         counts = Counter(file.status for file in files)
         for file in files:
             file.status = FileStatus.Queued
+            file.globus_transfer_task_id = None
         esg.db.add(*files)
         msg = "Sent back to the queue: "
         msg += ", ".join(

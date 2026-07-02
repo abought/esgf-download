@@ -29,6 +29,9 @@ from rich.progress import (
 from esgpull.config import Config
 from esgpull.context import Context
 from esgpull.database import Database
+from globus_sdk import GlobusAPIError
+
+from esgpull.downloader.as_globus import GlobusStatusTask
 from esgpull.downloader.as_https import DownloadCtx, check_disk_space
 from esgpull.downloader.base import (
     StartCallback,
@@ -36,11 +39,14 @@ from esgpull.downloader.base import (
     TaskStartEvent,
     TaskStatus,
 )
-from esgpull.downloader.factory import add_https_tasks
+from esgpull.downloader.factory import add_https_tasks, make_globus_tasks, partition_by_transfer_method
 from esgpull.downloader.orchestrator import Orchestrator
-from esgpull.downloader.ui import HttpsDownloadUI
+from esgpull.downloader.ui import GlobusDownloadUI, HttpsDownloadUI
 from esgpull.exceptions import (
     DownloadCancelled,
+    GlobusAuthError,
+    GlobusLoginError,
+    GlobusPermissionError,
     InsufficientDiskSpace,
     InvalidInstallPath,
     NoInstallPath,
@@ -99,10 +105,12 @@ def _process_task_result(
                 _track_file_state(db, fr.file, FileStatus.Cancelled, use_db)
             case FileStatus.Error:
                 _track_file_state(db, fr.file, FileStatus.Error, use_db)
-                errors.append(Err(fr.file, RuntimeError(event.msg)))
+                errors.append(Err(fr.file, RuntimeError(fr.msg or event.msg)))
+            case FileStatus.Started:
+                # Valid terminal state for Globus tasks: the remote transfer is running and will be checked later
+                _track_file_state(db, fr.file, FileStatus.Started, use_db)
             case _:
-                # This is essentially a state machine. If the task is not in an expected starting state,
-                #   it may indicate conflicts from another running esgpull process.
+                # Unexpected state — may indicate a bug or external data corruption.
                 raise RuntimeError(
                     f"Unexpected file status {fr.status!r} in completed task result"
                     f" for {fr.file.file_id} — halting downloads."
@@ -130,6 +138,21 @@ async def _drain_cancels(db: Database, orch: Orchestrator, use_db: bool) -> list
     for event in await orch.collect_cancels():
         errors += _process_task_result(db, event, use_db)
     return errors
+
+
+def _check_globus_auth_error(event: TaskResultEvent, client_id: str = "") -> None:
+    """Raise a specific GlobusAuthError subclass so the CLI can show a targeted message and exit with code 2."""
+    if not isinstance(event.exception, GlobusAPIError):
+        return
+    exc = event.exception
+    logger.debug(
+        "Globus API error — status=%s code=%s request_id=%s message=%r errors=%r",
+        exc.http_status, exc.code, exc.request_id, exc.message, exc.errors,
+    )
+    if exc.http_status == 401:
+        raise GlobusLoginError(client_id)
+    if exc.http_status == 403:
+        raise GlobusPermissionError(client_id)
 
 
 def _is_disk_full(event: TaskResultEvent) -> bool:
@@ -631,6 +654,88 @@ class Esgpull:
         except (KeyboardInterrupt, asyncio.CancelledError):
             errors += await _drain_cancels(self.db, orch, use_db)
             raise
+        return files, errors
+
+    async def _resolve_pending_globus_transfers(
+        self,
+        transfer_client: 'TransferClient',
+        use_db: bool = True,
+    ) -> tuple[list[File], list[Err]]:
+        """
+        Check all non-terminal Globus transfers once (no polling) and update their file statuses.
+        Called before submitting new transfers so that previously submitted work is accounted for first.
+        """
+        files: list[File] = []
+        errors: list[Err] = []
+
+        pending_transfers = self.db.scalars(sql.globus_transfer.pending())
+        if not pending_transfers:
+            return files, errors
+
+        orch = Orchestrator(max_concurrent_remote=self.config.download.max_concurrent)
+        for transfer in pending_transfers:
+            task = GlobusStatusTask(
+                task_label=transfer.task_id,
+                files=list(transfer.files),
+                client=transfer_client,
+                transfer_task_id=transfer.task_id,
+                wait_until_resolved=False,
+                poll_time_max=self.config.download.poll_globus_time_max,
+            )
+            orch.add_remote_task(task)
+
+        async for event in orch.iter_results():
+            _check_globus_auth_error(event, self.config.globus.client_id)
+            errors += _process_task_result(self.db, event, use_db)
+            files += [fr.file for fr in event.files if fr.status == FileStatus.Done]
+
+        return files, errors
+
+    async def download3_globus(
+        self,
+        transfer_client: 'TransferClient',
+        queue: list[File],
+        use_db: bool = True,
+        show_progress: bool = True,
+    ) -> tuple[list[File], list[Err]]:
+        """
+        Check in-progress Globus transfers for resolution, then submit new ones for files in queue.
+        """
+        files, errors = await self._resolve_pending_globus_transfers(transfer_client, use_db)
+
+        if not queue:
+            return files, errors
+
+        _, globus_files = partition_by_transfer_method(queue)
+        globus_tasks = make_globus_tasks(globus_files, self, transfer_client)
+        if not globus_tasks:
+            return files, errors
+
+        ui = GlobusDownloadUI(
+            self.ui,
+            len(globus_tasks),
+            show_task_bars=self.config.download.poll_globus,
+            show_progress=show_progress,
+        )
+        orch = Orchestrator(max_concurrent_remote=3)  # Globus limit: 3 concurrent active transfers
+        for task in globus_tasks:
+            orch.add_remote_task(task)
+            task.on_start(ui.on_start)
+            task.on_heartbeat(ui.on_heartbeat)
+        orch.on_task_start(_make_on_task_start(self.db, use_db))
+
+        gen = orch.iter_results()
+        try:
+            with ui.live():
+                async for event in gen:
+                    _check_globus_auth_error(event, self.config.globus.client_id)
+                    errors += _process_task_result(self.db, event, use_db)
+                    files += [fr.file for fr in event.files if fr.status == FileStatus.Done]
+                    ui.on_result(event)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            errors += await _drain_cancels(self.db, orch, use_db)
+            raise
+
         return files, errors
 
     def replace_queries(

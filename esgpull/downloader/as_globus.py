@@ -115,10 +115,10 @@ class GlobusStatusTask(GlobusTaskCommon):
                 self._poll_time = min(self._poll_time + 15, self._poll_time_max)
             await asyncio.sleep(self._poll_time)
 
-    async def _check_skipped_errors(self) -> set[str]:
-        """A successful globus task may skip some files due to errors. Record status correctly."""
+    async def _check_skipped_errors(self) -> dict[str, str]:
+        """Return {source_path: error_code} for each file skipped during a successful transfer."""
         skip_resp = self._client.paginated.task_skipped_errors(self._transfer_task_id)
-        return {f['source_path'] for f in skip_resp.items()}
+        return {item['source_path']: item['error_code'] for item in skip_resp.items()}
 
     ### Implementation
     def _handle_globus_exc(self, e: GlobusAPIError | NetworkError) -> TaskResultEvent:
@@ -167,7 +167,8 @@ class GlobusStatusTask(GlobusTaskCommon):
             return self._handle_globus_exc(e)
 
         fr = [
-            FileResult(FileStatus.Error if f.globus_fn in skipped else FileStatus.Done, f)
+            FileResult(FileStatus.Error, f, msg=skipped[f.globus_fn]) if f.globus_fn in skipped
+            else FileResult(FileStatus.Done, f)
             for f in to_download
         ]
         return self._make_result(TaskStatus.COMPLETE, 'The transfer succeeded', fr)
@@ -226,7 +227,15 @@ class GlobusTransferTask(GlobusTaskCommon):
         Must submit transfer in setup step so that the globus task ID can be emitted in start event"""
         td = self._make_transfer_data(to_download)
 
-        resp = self._client.submit_transfer(td)
+        try:
+            resp = self._client.submit_transfer(td)
+        except GlobusAPIError as e:
+            # TODO: remove after auth debugging is complete
+            logger.warning(
+                "Globus submit_transfer failed — status=%s code=%s request_id=%s message=%r",
+                e.http_status, e.code, e.request_id, e.message,
+            )
+            raise
         self._transfer_task_id = resp.data['task_id']
 
 

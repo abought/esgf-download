@@ -24,6 +24,7 @@ class FileResult:
     """Download result for one file"""
     status: FileStatus
     file: File
+    msg: str = ""
 
     @classmethod
     def fail_all(cls, files: list[File]) -> 'list[FileResult]':

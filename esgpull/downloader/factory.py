@@ -79,9 +79,10 @@ def make_globus_tasks(
     transfer_client: 'TransferClient',
 ) -> list[GlobusTransferTask]:
     """
-    Create one GlobusTransferTask per source collection, with an on_start callback
-    that persists a GlobusTransfer record (and associated files) to the database.
+    Create one GlobusTransferTask per source collection, with lifecycle callbacks
+    that persist GlobusTransfer records to the database on start and completion.
     """
+    cfg = app.config.download
     tasks = []
     for origin_id, batch in globus_files.items():
         task = GlobusTransferTask(
@@ -91,8 +92,11 @@ def make_globus_tasks(
             source_collection_id=origin_id,
             dest_collection_id=app.config.globus.destination_collection_uuid,
             dest_root_path=app.config.globus.destination_collection_root,
+            wait_until_resolved=cfg.poll_globus,
+            poll_time_max=cfg.poll_globus_time_max,
         )
         task.on_start(_make_globus_on_start(app))
+        task.on_result(_make_globus_on_result(app))
         tasks.append(task)
     return tasks
 
@@ -101,9 +105,7 @@ def _make_globus_on_start(app: 'Esgpull'):
     from esgpull.downloader.base import TaskStartEvent
 
     def on_start(start_info: TaskStartEvent) -> None:
-        # FIXME handle case where a task starts but not task ID set yet
         task_id = start_info.extra['globus_task_id']
-
         transfer = GlobusTransfer(
             task_id=task_id,
             status=GlobusTransferStatus.ACTIVE,
@@ -113,3 +115,26 @@ def _make_globus_on_start(app: 'Esgpull'):
             app.db.session.add(transfer)
 
     return on_start
+
+
+def _make_globus_on_result(app: 'Esgpull'):
+    from datetime import datetime, timezone
+    from esgpull.downloader.base import TaskResultEvent
+
+    def on_result(result: TaskResultEvent) -> None:
+        task_id = result.extra.get('globus_task_id')
+        if task_id is None:
+            # This branch triggers if task failed to submit to globus
+            return
+        transfer = app.db.session.get(GlobusTransfer, task_id)
+        if transfer is None:
+            return
+        globus_status = result.extra.get('globus_task_status')
+        if globus_status is not None:
+            transfer.status = globus_status
+        transfer.last_updated = datetime.now(timezone.utc)
+        transfer.completion_time = result.end_time
+        with app.db.commit_context():
+            app.db.session.add(transfer)
+
+    return on_result

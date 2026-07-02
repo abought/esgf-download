@@ -172,3 +172,16 @@ class AlreadyInstalledName(InstallException):
 
 class InsufficientDiskSpace(EsgpullException):
     msg = "Not enough free space on {}: need {}, have {}."
+
+
+class GlobusAuthError(EsgpullException):
+    """Base class for Globus authentication/authorization errors."""
+    msg = "Globus auth error."
+
+
+class GlobusLoginError(GlobusAuthError):
+    msg = "Globus authentication error (client: {}): credentials are missing or expired. Run `esgpull login` to re-authenticate."
+
+
+class GlobusPermissionError(GlobusAuthError):
+    msg = "Globus permission error (client: {}): the logged-in identity is not authorized to access the requested collection or path. Verify the correct identity is logged in and that the destination collection grants write access."
