@@ -158,6 +158,50 @@ class HttpsDownloadUI:
                 self._live = None
 
 
+class GlobusPrecheckUI:
+    """
+    Progress bar UI for the precheck step: resolving the status of Globus
+    transfers that were already submitted in a prior run, before any new
+    downloads are queued.
+
+    Unlike the download UIs, this tracks a single overall "M of N" count of
+    transfers checked — there is no per-file or per-collection breakdown.
+    """
+
+    def __init__(
+        self,
+        ui: UI,
+        queue_size: int,  # number of pending transfers being checked
+        show_progress: bool = True,
+    ) -> None:
+        self._app_ui = ui
+        self._show_progress = show_progress
+
+        self.progress = ui.make_progress(
+            TextColumn("Checking existing transfers:"),
+            SpinnerColumn(),
+            MofNCompleteColumn(separator=" of "),
+            transient=True,
+        )
+        self._main_task_id = self.progress.add_task("", total=queue_size)
+        self._live: Live | DummyLive | None = None
+
+    def on_result(self, event: TaskResultEvent) -> None:
+        self.progress.update(self._main_task_id, advance=1)
+
+    @contextlib.contextmanager
+    def live(self) -> Iterator[Live | DummyLive]:
+        with self._app_ui.live(
+            self.progress,
+            disable=not self._show_progress,
+        ) as live:
+            self._live = live
+            try:
+                yield live
+            finally:
+                self._live = None
+
+
 class GlobusDownloadUI:
     """Progress bar UI for a group of Globus transfer tasks (one per source collection)."""
 

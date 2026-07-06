@@ -230,7 +230,6 @@ class GlobusTransferTask(GlobusTaskCommon):
         try:
             resp = self._client.submit_transfer(td)
         except GlobusAPIError as e:
-            # TODO: remove after auth debugging is complete
             logger.warning(
                 "Globus submit_transfer failed — status=%s code=%s request_id=%s message=%r",
                 e.http_status, e.code, e.request_id, e.message,
