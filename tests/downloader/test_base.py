@@ -77,14 +77,6 @@ class TestCallbackRegistration:
         asyncio.run(task.run())
         assert cb.call_count == 1
 
-    def test_duplicate_result_callback_fires_once(self):
-        task = FakeDownloadTask("t", [make_file()])
-        cb = MagicMock()
-        task.on_result(cb)
-        task.on_result(cb)
-        asyncio.run(task.run())
-        assert cb.call_count == 1
-
     def test_multiple_heartbeat_callbacks_all_fire(self):
         task = FakeHeartbeatTask("t", [make_file()])
         cb1, cb2 = MagicMock(), MagicMock()
@@ -96,14 +88,6 @@ class TestCallbackRegistration:
 
 
 class TestRunEventSequence:
-    def test_start_fires_before_result(self):
-        call_log: list[str] = []
-        task = FakeDownloadTask("t", [make_file()])
-        task.on_start(lambda e: call_log.append("start"))
-        task.on_result(lambda e: call_log.append("result"))
-        asyncio.run(task.run())
-        assert call_log == ["start", "result"]
-
     def test_start_fires_when_pre_check_returns_empty_to_download(self):
         f = make_file()
         skip = [FileResult(FileStatus.Done, f)]
@@ -115,13 +99,6 @@ class TestRunEventSequence:
         event: TaskStartEvent = cb.call_args[0][0]
         assert event.files == []
         assert len(event.already_done) == 1
-
-    def test_result_fires_exactly_once(self):
-        task = FakeDownloadTask("t", [make_file()])
-        cb = MagicMock()
-        task.on_result(cb)
-        asyncio.run(task.run())
-        assert cb.call_count == 1
 
     def test_heartbeat_not_called_automatically_by_run(self):
         task = FakeDownloadTask("t", [make_file()])
@@ -280,10 +257,8 @@ class TestExtraPropagation:
 
     def test_extra_in_result_event(self):
         task = FakeExtraTask("t", [])
-        captured: list[TaskResultEvent] = []
-        task.on_result(lambda e: captured.append(e))
-        asyncio.run(task.run())
-        assert captured[0].extra == {"key": "val"}
+        result = asyncio.run(task.run())
+        assert result.extra == {"key": "val"}
 
     def test_extra_reevaluated_per_emission(self):
         task = FakeMutableHeartbeatTask("t", [make_file(file_id="a")])
@@ -360,15 +335,6 @@ class TestCancellationAndErrors:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(task.run())
         assert cleanup_statuses == [TaskStatus.CANCELED]
-
-    def test_cancelled_error_does_not_emit_result(self):
-        # This scenario is handled by the pipeline, which adds extra error capturing capabilities
-        task = FakeDownloadTask("t", [make_file()], raise_on_run=asyncio.CancelledError())
-        cb = MagicMock()
-        task.on_result(cb)
-        with pytest.raises(asyncio.CancelledError):
-            asyncio.run(task.run())
-        assert cb.call_count == 0
 
     def test_keyboard_interrupt_is_reraised(self):
         task = FakeDownloadTask("t", [make_file()], raise_on_run=KeyboardInterrupt())

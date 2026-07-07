@@ -2,7 +2,13 @@ import asyncio
 import logging
 from typing import AsyncGenerator
 
-from esgpull.downloader.base import DownloadTask, TaskResultEvent, StartCallback, HeartbeatCallback
+from esgpull.downloader.base import (
+    DownloadTask,
+    HeartbeatCallback,
+    ResultCallback,
+    StartCallback,
+    TaskResultEvent,
+)
 
 
 class Orchestrator:
@@ -29,6 +35,7 @@ class Orchestrator:
 
         self._start_callbacks: list[StartCallback] = []
         self._heartbeat_callbacks: list[HeartbeatCallback] = []
+        self._result_callbacks: list[ResultCallback] = []
 
     def add_local_task(self, task: DownloadTask) -> None:
         """Enqueue a task that performs direct, resource-intensive local work (eg HTTPS downloads)."""
@@ -49,24 +56,32 @@ class Orchestrator:
 
             try:
                 result = await task.run()
+                self._emit_result(result)
                 self._task_results.put_nowait(result)
 
             except (asyncio.CancelledError, KeyboardInterrupt):
                 # Worker was canceled by event loop or a synchronous SIGINT
                 failure = task.to_cancel()
+                self._emit_result(failure)
                 self._task_results.put_nowait(failure)
                 raise
             except Exception as err:
                 # Unhandled conditions should mark everything in the task as failed
                 logging.exception('An unknown error occurred')
                 failure = task.to_fail(str(err), exception=err)
+                self._emit_result(failure)
                 self._task_results.put_nowait(failure)
             except BaseException as err:
                 failure = task.to_fail(str(err), exception=err)
+                self._emit_result(failure)
                 self._task_results.put_nowait(failure)
                 raise
             finally:
                 queue.task_done()
+
+    def _emit_result(self, event: TaskResultEvent) -> None:
+        for cb in self._result_callbacks:
+            cb(event)
 
     #### Public interface
     def on_heartbeat(self, cb: HeartbeatCallback) -> None:
@@ -83,6 +98,16 @@ class Orchestrator:
         """
         if cb not in self._start_callbacks:
             self._start_callbacks.append(cb)
+
+    def on_result(self, cb: ResultCallback) -> None:
+        """
+        Register a callback fired for every task result the orchestrator produces, including cancels.
+
+        There is NO equivalent `DownloadTask.on_result`, because the orchestrator handles exceptions/cancels outside
+            what the task level callback could report.
+        """
+        if cb not in self._result_callbacks:
+            self._result_callbacks.append(cb)
 
     async def iter_results(self) -> AsyncGenerator[TaskResultEvent, None]:
         """
@@ -128,10 +153,13 @@ class Orchestrator:
 
         results: list[TaskResultEvent] = []
         while not self._task_results.empty():
+            # Already passed through _emit_result in _worker before being enqueued.
             results.append(self._task_results.get_nowait())
         for queue in (self._local_queue, self._remote_queue):
             while not queue.empty():
                 task = queue.get_nowait()
-                results.append(task.to_cancel())
+                cancel_result = task.to_cancel()
+                self._emit_result(cancel_result)
+                results.append(cancel_result)
                 queue.task_done()
         return results

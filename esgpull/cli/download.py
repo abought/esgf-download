@@ -49,21 +49,11 @@ def download(
             )
         esg.ui.print(graph)
 
-        # Per spec (download-combined.md): Resolve any pending Globus transfers
-        # before querying for files eligible for download, even when prefer_globus
-        # is off (transfers may have been submitted during a prior enabled period).
-        try:
-            transfer_client = get_transfer_client(esg.config)
-        except Exception as exc:
-            logger.error(f"Globus auth/config error: {exc}")
-            esg.ui.raise_maybe_record(Exit(2))
-            return
-
+        # RARE EDGE CASE: If `prefer_globus` is enabled, then disabled, existing Globus transfers are not checked at all.
+        #   Use `esgpull retry` to requeue files for download.
         async def _run() -> tuple[list[File], list]:
-            pre_files, pre_errors = await esg._resolve_pending_globus_transfers(transfer_client)
-
             if not esg.config.download.prefer_globus:
-                return pre_files, pre_errors
+                return [], []
 
             shas: set[str] = set()
             queue: list[File] = []
@@ -73,15 +63,16 @@ def download(
                         shas.add(file.sha)
                         queue.append(file)
 
-            if not queue:
-                return pre_files, pre_errors
+            try:
+                transfer_client = get_transfer_client(esg.config)
+            except Exception as client_exc:
+                logger.error(f"Globus auth/config error: {client_exc}")
+                esg.ui.raise_maybe_record(Exit(2))
+                return [], []
 
-            # download3_globus re-runs _resolve internally; that call will be a
-            # no-op because all pending transfers were resolved above.
-            new_files, new_errors = await esg.download3_globus(
+            return await esg.download3_globus(
                 transfer_client, queue, show_progress=not quiet
             )
-            return pre_files + new_files, pre_errors + new_errors
 
         try:
             files, errors = asyncio.run(_run())

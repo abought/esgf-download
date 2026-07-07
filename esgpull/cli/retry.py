@@ -6,7 +6,7 @@ from click.exceptions import Abort, Exit
 
 from esgpull.cli.decorators import args, opts
 from esgpull.cli.utils import init_esgpull
-from esgpull.models import FileStatus, sql
+from esgpull.models import File, FileStatus, sql
 from esgpull.tui import Verbosity
 
 
@@ -27,8 +27,21 @@ def retry(
         assert FileStatus.Done not in status
         assert FileStatus.Queued not in status
         files = list(esg.db.scalars(sql.file.with_status(*status)))
+
+        # Rare edge case: If globus is enabled, then disabled, any files left pending will be re-queued.
+        # In practice, if changing download method, we recommend using a new profile so all files are downloaded
+        #   consistently according to the changed rules.
+        stale_files: list[File] = []
+        if not esg.config.download.prefer_globus:
+            explicit_shas = {file.sha for file in files}
+            stale_files = [
+                file
+                for file in esg.fail_pending_globus_transfers()
+                if file.sha not in explicit_shas
+            ]
+
         status_str = "/".join(f"[bold red]{s.value}[/]" for s in status)
-        if not files:
+        if not files and not stale_files:
             esg.ui.print(f"No {status_str} files found.")
             raise Exit(0)
         counts = Counter(file.status for file in files)
@@ -36,9 +49,12 @@ def retry(
             file.status = FileStatus.Queued
             file.globus_transfer_task_id = None
         esg.db.add(*files)
-        msg = "Sent back to the queue: "
-        msg += ", ".join(
+        parts = [
             f"{count} [bold red]{status.value}[/]"
             for status, count in counts.items()
-        )
-        esg.ui.print(msg)
+        ]
+        if stale_files:
+            parts.append(
+                f"{len(stale_files)} [bold red]Globus mode was disabled. Unresolved Globus transfer(s)[/]"
+            )
+        esg.ui.print("Sent back to the queue: " + ", ".join(parts))

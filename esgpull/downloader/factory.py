@@ -79,8 +79,10 @@ def make_globus_tasks(
     transfer_client: 'TransferClient',
 ) -> list[GlobusTransferTask]:
     """
-    Create one GlobusTransferTask per source collection, with lifecycle callbacks
-    that persist GlobusTransfer records to the database on start and completion.
+    Create one GlobusTransferTask per source collection, with a task-level start callback
+    that creates the GlobusTransfer record in the database.
+
+    Result tracking must be handled separately at the orchestrator level.
     """
     cfg = app.config.download
     tasks = []
@@ -96,7 +98,6 @@ def make_globus_tasks(
             poll_time_max=cfg.poll_globus_time_max,
         )
         task.on_start(_make_globus_on_start(app))
-        task.on_result(_make_globus_on_result(app))
         tasks.append(task)
     return tasks
 
@@ -115,26 +116,3 @@ def _make_globus_on_start(app: 'Esgpull'):
             app.db.session.add(transfer)
 
     return on_start
-
-
-def _make_globus_on_result(app: 'Esgpull'):
-    from datetime import datetime, timezone
-    from esgpull.downloader.base import TaskResultEvent
-
-    def on_result(result: TaskResultEvent) -> None:
-        task_id = result.extra.get('globus_task_id')
-        if task_id is None:
-            # This branch triggers if task failed to submit to globus
-            return
-        transfer = app.db.session.get(GlobusTransfer, task_id)
-        if transfer is None:
-            return
-        globus_status = result.extra.get('globus_task_status')
-        if globus_status is not None:
-            transfer.status = globus_status
-        transfer.last_updated = datetime.now(timezone.utc)
-        transfer.completion_time = result.end_time
-        with app.db.commit_context():
-            app.db.session.add(transfer)
-
-    return on_result

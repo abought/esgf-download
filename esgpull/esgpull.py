@@ -7,7 +7,7 @@ import os
 import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import cached_property, partial
 from pathlib import Path
 from warnings import warn
@@ -34,6 +34,7 @@ from globus_sdk import GlobusAPIError
 from esgpull.downloader.as_globus import GlobusStatusTask
 from esgpull.downloader.as_https import DownloadCtx, check_disk_space
 from esgpull.downloader.base import (
+    ResultCallback,
     StartCallback,
     TaskResultEvent,
     TaskStartEvent,
@@ -41,7 +42,7 @@ from esgpull.downloader.base import (
 )
 from esgpull.downloader.factory import add_https_tasks, make_globus_tasks, partition_by_transfer_method
 from esgpull.downloader.orchestrator import Orchestrator
-from esgpull.downloader.ui import GlobusDownloadUI, HttpsDownloadUI
+from esgpull.downloader.ui import GlobusDownloadUI, GlobusPrecheckUI, HttpsDownloadUI
 from esgpull.exceptions import (
     DownloadCancelled,
     GlobusAuthError,
@@ -59,6 +60,8 @@ from esgpull.models import (
     Facet,
     File,
     FileStatus,
+    GlobusTransfer,
+    GlobusTransferStatus,
     LegacyQuery,
     Options,
     Query,
@@ -129,15 +132,44 @@ def _make_on_task_start(db: Database, use_db: bool) -> StartCallback:
     return on_start
 
 
-async def _drain_cancels(db: Database, orch: Orchestrator, use_db: bool) -> list[Err]:
+def _make_on_result_file_state(
+    db: Database,
+    use_db: bool,
+    files: list[File],
+    errors: list[Err],
+) -> ResultCallback:
     """
-    If the program terminates early, mark files as canceled. Primarily used by download-as-url tasks,
-        where program termination immediately ends the download.
+    Common per-file DB state tracking, used by all download types
     """
-    errors: list[Err] = []
-    for event in await orch.collect_cancels():
-        errors += _process_task_result(db, event, use_db)
-    return errors
+    def on_result(event: TaskResultEvent) -> None:
+        errors.extend(_process_task_result(db, event, use_db))
+        files.extend(fr.file for fr in event.files if fr.status == FileStatus.Done)
+
+    return on_result
+
+
+def _make_globus_transfer_on_result(db: Database) -> ResultCallback:
+    """
+    Track state of an async Globus Transfer task, separate from the files within
+    """
+    def on_result(event: TaskResultEvent) -> None:
+        task_id = event.extra.get('globus_task_id')
+        if task_id is None:
+            return
+        transfer = db.session.get(GlobusTransfer, task_id)
+        if transfer is None:
+            # TODO consider exception- this really should not be possible
+            logger.error('A globus transfer task references a task_id that it not tracked in the database')
+            return
+        globus_status = event.extra.get('globus_task_status')
+        if globus_status is not None:
+            # If a globus task id is present, globus status should always be set
+            transfer.status = globus_status
+        transfer.last_updated = datetime.now(timezone.utc)
+        transfer.completion_time = event.end_time
+        db.add(transfer)
+
+    return on_result
 
 
 def _check_globus_auth_error(event: TaskResultEvent, client_id: str = "") -> None:
@@ -610,7 +642,7 @@ class Esgpull:
 
     async def download2_https(
         self,
-        queue: list[File],  # TODO: Design q. Consider revisiting how eligible files are dwetermined in replicator (cron) mode. Do we want to exclude canceled files until `esgpull retry` is run? Does that make sense for a hands-off process?
+        queue: list[File],  # TODO: Design q. Consider revisiting how eligible files are determined in replicator (cron) mode. Do we want to exclude canceled files until `esgpull retry` is run? Does that make sense for a hands-off process?
         use_db: bool = True,
         show_progress: bool = True,
     ) -> tuple[list[File], list[Err]]:
@@ -632,18 +664,16 @@ class Esgpull:
 
         files: list[File] = []
         errors: list[Err] = []
+        orch.on_result(_make_on_result_file_state(self.db, use_db, files, errors))
+        orch.on_result(ui.on_result)
+
         gen = orch.iter_results()
         try:
             with ui.live():
                 async for event in gen:
-                    errors += _process_task_result(self.db, event, use_db)
-                    files += [
-                        fr.file for fr in event.files if fr.status == FileStatus.Done
-                    ]
-                    ui.on_result(event)
                     if _is_disk_full(event):
                         await gen.aclose()
-                        errors += await _drain_cancels(self.db, orch, use_db)
+                        await orch.collect_cancels()
                         needed = sum(file.size for file in queue)
                         free = shutil.disk_usage(self.fs.paths.data).free
                         raise InsufficientDiskSpace(
@@ -652,27 +682,40 @@ class Esgpull:
                             format_size(free),
                         )
         except (KeyboardInterrupt, asyncio.CancelledError):
-            errors += await _drain_cancels(self.db, orch, use_db)
+            await orch.collect_cancels()
             raise
         return files, errors
 
-    async def _resolve_pending_globus_transfers(
+    async def check_existing_globus_transfers(
         self,
         transfer_client: 'TransferClient',
         use_db: bool = True,
+        show_progress: bool = True,
     ) -> tuple[list[File], list[Err]]:
         """
         Check all non-terminal Globus transfers once (no polling) and update their file statuses.
         Called before submitting new transfers so that previously submitted work is accounted for first.
+
+        Only runs when `config.download.prefer_globus` is enabled. When disabled, existing
+        transfers are intentionally left unchecked — Globus may have been turned off along with
+        its credentials, and it becomes the job of `esgpull update`/`esgpull retry` to make those
+        files eligible for download again under whichever method is currently active.
+
+        Since this only runs with `prefer_globus` enabled, Globus is required for basic
+        functionality: any un-retryable failure to check a transfer's status (eg an auth error) stops the
+        program by letting `GlobusAuthError` propagate.
         """
         files: list[File] = []
         errors: list[Err] = []
+        if not self.config.download.prefer_globus:
+            return files, errors
 
         pending_transfers = self.db.scalars(sql.globus_transfer.pending())
         if not pending_transfers:
             return files, errors
 
-        orch = Orchestrator(max_concurrent_remote=self.config.download.max_concurrent)
+        ui = GlobusPrecheckUI(self.ui, len(pending_transfers), show_progress)
+        orch = Orchestrator(max_concurrent_remote=3)  # Globus limit: 3 concurrent active transfers
         for transfer in pending_transfers:
             task = GlobusStatusTask(
                 task_label=transfer.task_id,
@@ -683,13 +726,41 @@ class Esgpull:
                 poll_time_max=self.config.download.poll_globus_time_max,
             )
             orch.add_remote_task(task)
+        orch.on_task_start(_make_on_task_start(self.db, use_db))
+        orch.on_result(_make_on_result_file_state(self.db, use_db, files, errors))
+        orch.on_result(_make_globus_transfer_on_result(self.db))
+        orch.on_result(ui.on_result)
 
-        async for event in orch.iter_results():
-            _check_globus_auth_error(event, self.config.globus.client_id)
-            errors += _process_task_result(self.db, event, use_db)
-            files += [fr.file for fr in event.files if fr.status == FileStatus.Done]
+        gen = orch.iter_results()
+        try:
+            with ui.live():
+                async for event in gen:
+                    _check_globus_auth_error(event, self.config.globus.client_id)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            await orch.collect_cancels()
+            raise
 
         return files, errors
+
+    def fail_pending_globus_transfers(self, use_db: bool = True) -> list[File]:
+        """
+        Mark all non-terminal Globus transfers as failed, and re-queue their files for
+        whatever download mechanism is currently allowed.
+
+        Used by `esgpull retry`/`esgpull update` when `config.download.prefer_globus` is
+        disabled: if a user turned off globus mode, the file download should switch to other methods.
+        """
+        files: list[File] = []
+        for transfer in self.db.scalars(sql.globus_transfer.pending()):
+            transfer.status = GlobusTransferStatus.FAILED
+            transfer_files = list(transfer.files)
+            for file in transfer_files:
+                file.status = FileStatus.Queued
+                file.globus_transfer_task_id = None
+            files.extend(transfer_files)
+            if use_db:
+                self.db.add(transfer, *transfer_files)
+        return files
 
     async def download3_globus(
         self,
@@ -701,7 +772,7 @@ class Esgpull:
         """
         Check in-progress Globus transfers for resolution, then submit new ones for files in queue.
         """
-        files, errors = await self._resolve_pending_globus_transfers(transfer_client, use_db)
+        files, errors = await self.check_existing_globus_transfers(transfer_client, use_db, show_progress)
 
         if not queue:
             return files, errors
@@ -723,17 +794,17 @@ class Esgpull:
             task.on_start(ui.on_start)
             task.on_heartbeat(ui.on_heartbeat)
         orch.on_task_start(_make_on_task_start(self.db, use_db))
+        orch.on_result(_make_on_result_file_state(self.db, use_db, files, errors))
+        orch.on_result(_make_globus_transfer_on_result(self.db))
+        orch.on_result(ui.on_result)
 
         gen = orch.iter_results()
         try:
             with ui.live():
                 async for event in gen:
                     _check_globus_auth_error(event, self.config.globus.client_id)
-                    errors += _process_task_result(self.db, event, use_db)
-                    files += [fr.file for fr in event.files if fr.status == FileStatus.Done]
-                    ui.on_result(event)
         except (KeyboardInterrupt, asyncio.CancelledError):
-            errors += await _drain_cancels(self.db, orch, use_db)
+            await orch.collect_cancels()
             raise
 
         return files, errors

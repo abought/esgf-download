@@ -21,7 +21,6 @@ from esgpull.downloader.fs import Filesystem
 from esgpull.downloader.orchestrator import Orchestrator
 from esgpull.downloader.ui import HttpsDownloadUI
 from esgpull.esgpull import (
-    _drain_cancels,
     _is_disk_full,
     _make_on_task_start,
     _process_task_result,

@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import enum
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from esgpull.models import File
 from esgpull.models.file import FileStatus
@@ -114,7 +114,6 @@ class DownloadTask(ABC):
 
         self._heartbeat_callbacks: list[HeartbeatCallback] = []
         self._start_callbacks: list[StartCallback] = []
-        self._result_callbacks: list[ResultCallback] = []
 
     #########
     # Internal helpers
@@ -156,10 +155,6 @@ class DownloadTask(ABC):
             self._start_time,
             exception=exception,
         )
-
-    def _emit_result(self, event: TaskResultEvent):
-        for callback in self._result_callbacks:
-            callback(event)
 
     @abstractmethod
     def to_cancel(self) -> TaskResultEvent:
@@ -233,16 +228,6 @@ class DownloadTask(ABC):
         if callback not in self._heartbeat_callbacks:
             self._heartbeat_callbacks.append(callback)
 
-    def on_result(self, callback: ResultCallback):
-        """
-        Exactly mirrors the return value of `task.run()`, but in a way that allows type-specific end behavior
-            (outside of the task: like cleaning up DB records of globus transfer tasks)
-
-        Unlike task.run(), callbacks are not guaranteed to fire if a task fails or is canceled
-        """
-        if callback not in self._result_callbacks:
-            self._result_callbacks.append(callback)
-
     def on_start(self, callback: StartCallback) -> None:
         """
         Tasks *will* emit a start event that can be used for customized per-task behavior.
@@ -274,9 +259,7 @@ class DownloadTask(ABC):
         except Exception as e:
             # Nothing was actually started (eg the remote service rejected submission), so there's
             # no start event to emit. Report it the same way the orchestrator's own catch-all would.
-            final = await self._cleanup(self.to_fail(str(e), exception=e))
-            self._emit_result(final)
-            return final
+            return await self._cleanup(self.to_fail(str(e), exception=e))
 
         self._emit_start(to_download, skip)
 
@@ -289,5 +272,4 @@ class DownloadTask(ABC):
             await self._cleanup(self.to_cancel())
             raise
 
-        self._emit_result(final)
         return final
