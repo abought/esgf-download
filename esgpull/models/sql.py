@@ -1,4 +1,5 @@
 import functools
+from collections.abc import Sequence
 
 import sqlalchemy as sa
 
@@ -107,28 +108,17 @@ class file:
         return sa.select(File).where(File.status.in_(status))
 
     @staticmethod
-    def ready_for_download() -> sa.Select[tuple[File]]:
+    def ready_for_download(query_shas: Sequence[str] | None = None) -> sa.Select[tuple[File]]:
         """
-        Select files that are eligible to download or retry.
-
-        Includes files with status Queued, Error, or Cancelled, excluding any
-        file currently claimed by an in-progress Globus transfer (ACTIVE or
-        INACTIVE). Files linked to a terminal Globus transfer (FAILED or
-        SUCCEEDED) are included so they can be retried.
+        Select Queued files, optionally scoped to a set of query shas (eg a `--tag`/query_id
+        filter). Defaults to selecting files from all queries
         """
-        eligible_statuses = [FileStatus.Queued, *FileStatus.retryable()]
-        in_progress_globus = [GlobusTransferStatus.ACTIVE, GlobusTransferStatus.INACTIVE]
-        return (
-            sa.select(File)
-            .outerjoin(File.globus_transfer)
-            .where(File.status.in_(eligible_statuses))
-            .where(
-                sa.or_(
-                    File.globus_transfer_task_id.is_(None),
-                    GlobusTransfer.status.not_in(in_progress_globus),
-                )
+        stmt = sa.select(File).where(File.status == FileStatus.Queued)
+        if query_shas is not None:
+            stmt = stmt.join(query_file_proxy).where(
+                query_file_proxy.c.query_sha.in_(query_shas)
             )
-        )
+        return stmt.distinct()
 
     @staticmethod
     def with_file_id(file_id: str) -> sa.Select[tuple[str]]:

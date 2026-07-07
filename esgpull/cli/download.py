@@ -6,9 +6,9 @@ from click.exceptions import Abort, Exit
 
 from esgpull.cli.decorators import args, opts
 from esgpull.cli.utils import get_queries, init_esgpull, valid_name_tag
-from esgpull.exceptions import GlobusAuthError
+from esgpull.exceptions import GlobusAuthError, InsufficientDiskSpace
 from esgpull.globus.transfer import get_transfer_client
-from esgpull.models import File, FileStatus
+from esgpull.models import File, sql
 from esgpull.tui import Verbosity, logger
 from esgpull.utils import format_size
 
@@ -52,31 +52,39 @@ def download(
         # RARE EDGE CASE: If `prefer_globus` is enabled, then disabled, existing Globus transfers are not checked at all.
         #   Use `esgpull retry` to requeue files for download.
         async def _run() -> tuple[list[File], list]:
-            if not esg.config.download.prefer_globus:
-                return [], []
+            pre_files: list[File] = []
+            pre_errors: list = []
+            transfer_client = None
 
-            shas: set[str] = set()
-            queue: list[File] = []
-            for query in graph.queries.values():
-                for file in query.files:
-                    if file.status == FileStatus.Queued and file.sha not in shas:
-                        shas.add(file.sha)
-                        queue.append(file)
+            if esg.config.download.prefer_globus:
+                try:
+                    transfer_client = get_transfer_client(esg.config)
+                except Exception as client_exc:
+                    logger.error(f"Globus auth/config error: {client_exc}")
+                    esg.ui.raise_maybe_record(Exit(2))
+                    return [], []
 
-            try:
-                transfer_client = get_transfer_client(esg.config)
-            except Exception as client_exc:
-                logger.error(f"Globus auth/config error: {client_exc}")
-                esg.ui.raise_maybe_record(Exit(2))
-                return [], []
+                pre_files, pre_errors = await esg.check_existing_globus_transfers(
+                    transfer_client, show_progress=not quiet
+                )
 
-            return await esg.download3_globus(
-                transfer_client, queue, show_progress=not quiet
+            # Query eligible files AFTER the precheck: resolving a pending transfer may
+            # free its files up for (re)download (eg Started -> Error, now retry-eligible).
+            # Error/Cancelled files are excluded here: per `esgpull retry`'s docs, they only
+            # re-enter the queue via that explicit command, not a plain `esgpull download`.
+            query_shas = list(graph.queries.keys())
+            queue = list(esg.db.scalars(
+                sql.file.ready_for_download(query_shas)
+            ))
+
+            new_files, new_errors = await esg.download4_combined(
+                queue, transfer_client=transfer_client, show_progress=not quiet
             )
+            return pre_files + new_files, pre_errors + new_errors
 
         try:
             files, errors = asyncio.run(_run())
-        except GlobusAuthError as exc:
+        except (GlobusAuthError, InsufficientDiskSpace) as exc:
             logger.error(str(exc))
             esg.ui.raise_maybe_record(Exit(2))
             return
