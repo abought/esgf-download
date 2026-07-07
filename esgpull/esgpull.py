@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import errno
 import logging
-import os
 import shutil
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from functools import cached_property, partial
 from pathlib import Path
 from warnings import warn
@@ -29,38 +27,35 @@ from rich.progress import (
 from esgpull.config import Config
 from esgpull.context import Context
 from esgpull.database import Database
-from globus_sdk import GlobusAPIError
 
 from esgpull.downloader.as_globus import GlobusStatusTask
 from esgpull.downloader.as_https import DownloadCtx, check_disk_space
-from esgpull.downloader.base import (
-    ResultCallback,
-    StartCallback,
-    TaskResultEvent,
-    TaskStartEvent,
-    TaskStatus,
+from esgpull.downloader.base import TaskResultEvent
+from esgpull.downloader.callbacks import (
+    check_globus_auth_error,
+    is_disk_full,
+    make_file_state_on_result,
+    make_globus_transfer_on_result,
+    make_on_task_start,
 )
 from esgpull.downloader.factory import add_https_tasks, make_globus_tasks, partition_by_transfer_method
 from esgpull.downloader.orchestrator import Orchestrator
 from esgpull.downloader.ui import GlobusDownloadUI, GlobusPrecheckUI, HttpsDownloadUI
 from esgpull.exceptions import (
     DownloadCancelled,
-    GlobusAuthError,
-    GlobusLoginError,
-    GlobusPermissionError,
     InsufficientDiskSpace,
     InvalidInstallPath,
     NoInstallPath,
     UnknownDefaultQueryID,
 )
 from esgpull.downloader.fs import Filesystem
+from esgpull.globus.transfer import get_transfer_client
 from esgpull.graph import Graph
 from esgpull.install_config import InstallConfig
 from esgpull.models import (
     Facet,
     File,
     FileStatus,
-    GlobusTransfer,
     GlobusTransferStatus,
     LegacyQuery,
     Options,
@@ -79,116 +74,6 @@ from esgpull.downloader.pipeline import Processor
 from esgpull.result import Err, Ok, Result
 from esgpull.tui import UI, DummyLive, ErrorCountColumn, Verbosity, logger
 from esgpull.utils import format_size
-
-
-def _track_file_state(db: Database, file: File, status: FileStatus, use_db: bool) -> None:
-    file.status = status
-    if use_db:
-        db.add(file)
-
-
-def _process_task_result(
-    db: Database,
-    event: TaskResultEvent,
-    use_db: bool,
-) -> list[Err]:
-    """
-    When a download task completes, immediately update the DB state for that file
-    Apply one orchestrator result to the DB; return Errs for any non-done files.
-
-    NOTE: a task can finish with `TaskStatus.COMPLETE` even if one or all of its files failed.
-        The database should reflect `File.Status` for each file in the task separately.
-    """
-    errors: list[Err] = []
-    for fr in event.files:
-        match fr.status:
-            case FileStatus.Done:
-                _track_file_state(db, fr.file, FileStatus.Done, use_db)
-            case FileStatus.Cancelled:
-                _track_file_state(db, fr.file, FileStatus.Cancelled, use_db)
-            case FileStatus.Error:
-                _track_file_state(db, fr.file, FileStatus.Error, use_db)
-                errors.append(Err(fr.file, RuntimeError(fr.msg or event.msg)))
-            case FileStatus.Started:
-                # Valid terminal state for Globus tasks: the remote transfer is running and will be checked later
-                _track_file_state(db, fr.file, FileStatus.Started, use_db)
-            case _:
-                # Unexpected state — may indicate a bug or external data corruption.
-                raise RuntimeError(
-                    f"Unexpected file status {fr.status!r} in completed task result"
-                    f" for {fr.file.file_id} — halting downloads."
-                    f" This may indicate a bug in the task implementation or external data corruption."
-                )
-    return errors
-
-
-def _make_on_task_start(db: Database, use_db: bool) -> StartCallback:
-    def on_start(event: TaskStartEvent) -> None:
-        for file in event.files:
-            _track_file_state(db, file, FileStatus.Starting, use_db)
-        for fr in event.already_done:
-            _track_file_state(db, fr.file, FileStatus.Done, use_db)
-
-    return on_start
-
-
-def _make_on_result_file_state(
-    db: Database,
-    use_db: bool,
-    files: list[File],
-    errors: list[Err],
-) -> ResultCallback:
-    """
-    Common per-file DB state tracking, used by all download types
-    """
-    def on_result(event: TaskResultEvent) -> None:
-        errors.extend(_process_task_result(db, event, use_db))
-        files.extend(fr.file for fr in event.files if fr.status == FileStatus.Done)
-
-    return on_result
-
-
-def _make_globus_transfer_on_result(db: Database) -> ResultCallback:
-    """
-    Track state of an async Globus Transfer task, separate from the files within
-    """
-    def on_result(event: TaskResultEvent) -> None:
-        task_id = event.extra.get('globus_task_id')
-        if task_id is None:
-            return
-        transfer = db.session.get(GlobusTransfer, task_id)
-        if transfer is None:
-            # TODO consider exception- this really should not be possible
-            logger.error('A globus transfer task references a task_id that it not tracked in the database')
-            return
-        globus_status = event.extra.get('globus_task_status')
-        if globus_status is not None:
-            # If a globus task id is present, globus status should always be set
-            transfer.status = globus_status
-        transfer.last_updated = datetime.now(timezone.utc)
-        transfer.completion_time = event.end_time
-        db.add(transfer)
-
-    return on_result
-
-
-def _check_globus_auth_error(event: TaskResultEvent, client_id: str = "") -> None:
-    """Raise a specific GlobusAuthError subclass so the CLI can show a targeted message and exit with code 2."""
-    if not isinstance(event.exception, GlobusAPIError):
-        return
-    exc = event.exception
-    logger.debug(
-        "Globus API error — status=%s code=%s request_id=%s message=%r errors=%r",
-        exc.http_status, exc.code, exc.request_id, exc.message, exc.errors,
-    )
-    if exc.http_status == 401:
-        raise GlobusLoginError(client_id)
-    if exc.http_status == 403:
-        raise GlobusPermissionError(client_id)
-
-
-def _is_disk_full(event: TaskResultEvent) -> bool:
-    return event.status == TaskStatus.FAIL and os.strerror(errno.ENOSPC) in event.msg
 
 
 @dataclass(repr=False)
@@ -660,18 +545,18 @@ class Esgpull:
         # Eventually, both URL-based files and globus downloads will use the same orchestrator
         orch = Orchestrator(max_concurrent_local=self.config.download.max_concurrent)
         add_https_tasks(orch, queue, self, ui)
-        orch.on_task_start(_make_on_task_start(self.db, use_db))
+        orch.on_task_start(make_on_task_start(self.db, use_db))
 
         files: list[File] = []
         errors: list[Err] = []
-        orch.on_result(_make_on_result_file_state(self.db, use_db, files, errors))
+        orch.on_result(make_file_state_on_result(self.db, use_db, files, errors))
         orch.on_result(ui.on_result)
 
         gen = orch.iter_results()
         try:
             with ui.live():
                 async for event in gen:
-                    if _is_disk_full(event):
+                    if is_disk_full(event):
                         await gen.aclose()
                         await orch.collect_cancels()
                         needed = sum(file.size for file in queue)
@@ -726,16 +611,16 @@ class Esgpull:
                 poll_time_max=self.config.download.poll_globus_time_max,
             )
             orch.add_remote_task(task)
-        orch.on_task_start(_make_on_task_start(self.db, use_db))
-        orch.on_result(_make_on_result_file_state(self.db, use_db, files, errors))
-        orch.on_result(_make_globus_transfer_on_result(self.db))
+        orch.on_task_start(make_on_task_start(self.db, use_db))
+        orch.on_result(make_file_state_on_result(self.db, use_db, files, errors))
+        orch.on_result(make_globus_transfer_on_result(self.db))
         orch.on_result(ui.on_result)
 
         gen = orch.iter_results()
         try:
             with ui.live():
                 async for event in gen:
-                    _check_globus_auth_error(event, self.config.globus.client_id)
+                    check_globus_auth_error(event, self.config.globus.client_id)
         except (KeyboardInterrupt, asyncio.CancelledError):
             await orch.collect_cancels()
             raise
@@ -778,31 +663,136 @@ class Esgpull:
             return files, errors
 
         _, globus_files = partition_by_transfer_method(queue)
-        globus_tasks = make_globus_tasks(globus_files, self, transfer_client)
-        if not globus_tasks:
+        if not globus_files:
             return files, errors
 
         ui = GlobusDownloadUI(
             self.ui,
-            len(globus_tasks),
+            len(globus_files),
             show_task_bars=self.config.download.poll_globus,
             show_progress=show_progress,
         )
+        globus_tasks = make_globus_tasks(globus_files, self, transfer_client, ui)
+
         orch = Orchestrator(max_concurrent_remote=3)  # Globus limit: 3 concurrent active transfers
         for task in globus_tasks:
             orch.add_remote_task(task)
-            task.on_start(ui.on_start)
-            task.on_heartbeat(ui.on_heartbeat)
-        orch.on_task_start(_make_on_task_start(self.db, use_db))
-        orch.on_result(_make_on_result_file_state(self.db, use_db, files, errors))
-        orch.on_result(_make_globus_transfer_on_result(self.db))
+        orch.on_task_start(make_on_task_start(self.db, use_db))
+        orch.on_result(make_file_state_on_result(self.db, use_db, files, errors))
+        orch.on_result(make_globus_transfer_on_result(self.db))
         orch.on_result(ui.on_result)
 
         gen = orch.iter_results()
         try:
             with ui.live():
                 async for event in gen:
-                    _check_globus_auth_error(event, self.config.globus.client_id)
+                    check_globus_auth_error(event, self.config.globus.client_id)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            await orch.collect_cancels()
+            raise
+
+        return files, errors
+
+    async def download4_combined(
+        self,
+        queue: list[File],
+        transfer_client: 'TransferClient | None' = None,
+        use_db: bool = True,
+        show_progress: bool = True,
+    ) -> tuple[list[File], list[Err]]:
+        """
+        Download a specified list of files. Chooses the transfer method based on user-selected `config` options.
+        """
+        files: list[File] = []
+        errors: list[Err] = []
+        if not queue:
+            return files, errors
+
+        # Only split out Globus-eligible files when we'd actually use Globus for them.
+        # Every file has a plain HTTPS url regardless of whether it also has Globus
+        # storage metadata, so with Globus disabled everything just downloads via HTTPS
+        # instead of silently dropping the Globus-tagged share of the queue.
+        globus_files: dict[str, list[File]]
+        if self.config.download.prefer_globus:
+            https_files, globus_files = partition_by_transfer_method(queue)
+        else:
+            https_files, globus_files = list(queue), {}
+
+        if https_files:
+            # Files are downloaded to a local disk that we can introspect- run sanity checks
+            check_disk_space(https_files, self.fs)
+
+        orch = Orchestrator(
+            max_concurrent_local=self.config.download.max_concurrent,
+            max_concurrent_remote=3,  # Globus limit: 3 concurrent active transfers
+        )
+
+        https_ui: HttpsDownloadUI | None = None
+        if https_files:
+            https_ui = HttpsDownloadUI(
+                self.ui,
+                len(https_files),
+                self.config.download.show_filename,
+                show_progress,
+            )
+            add_https_tasks(orch, https_files, self, https_ui)
+
+        globus_ui: GlobusDownloadUI | None = None
+        if globus_files:
+            if not transfer_client:
+                transfer_client = get_transfer_client(self.config)
+            globus_ui = GlobusDownloadUI(
+                self.ui,
+                len(globus_files),
+                show_task_bars=self.config.download.poll_globus,
+                show_progress=show_progress,
+            )
+            for task in make_globus_tasks(globus_files, self, transfer_client, globus_ui):
+                orch.add_remote_task(task)
+
+        if https_ui is None and globus_ui is None:
+            return files, errors
+
+        # File and task state tracking
+        orch.on_task_start(make_on_task_start(self.db, use_db))
+        orch.on_result(make_file_state_on_result(self.db, use_db, files, errors))
+        orch.on_result(make_globus_transfer_on_result(self.db))
+
+        def _route_result(event: TaskResultEvent) -> None:
+            if 'globus_task_id' in event.extra and globus_ui is not None:
+                globus_ui.on_result(event)
+            elif https_ui is not None:
+                https_ui.on_result(event)
+
+        orch.on_result(_route_result)
+
+        live_renderables: list[Progress] = []
+        if https_ui is not None:
+            live_renderables += [https_ui.file_progress, https_ui.main_progress]
+        if globus_ui is not None:
+            live_renderables += [globus_ui.task_progress, globus_ui.main_progress]
+
+        gen = orch.iter_results()
+        try:
+            with self.ui.live(*live_renderables, disable=not show_progress) as live:
+                if https_ui is not None:
+                    https_ui._live = live
+                if globus_ui is not None:
+                    globus_ui._live = live
+                async for event in gen:
+                    # Most result handling is done by callbacks. This block handles special cases where a single
+                    #   forced task should force ALL downloads to stop immediately.
+                    check_globus_auth_error(event, self.config.globus.client_id)
+                    if is_disk_full(event):
+                        await gen.aclose()
+                        await orch.collect_cancels()
+                        needed = sum(file.size for file in https_files)
+                        free = shutil.disk_usage(self.fs.paths.data).free
+                        raise InsufficientDiskSpace(
+                            self.fs.paths.data,
+                            format_size(needed),
+                            format_size(free),
+                        )
         except (KeyboardInterrupt, asyncio.CancelledError):
             await orch.collect_cancels()
             raise

@@ -13,7 +13,7 @@ from esgpull.models.globus_transfer import GlobusTransfer, GlobusTransferStatus
 if TYPE_CHECKING:
     from globus_sdk import TransferClient
     from esgpull.esgpull import Esgpull
-    from esgpull.downloader.ui import HttpsDownloadUI
+    from esgpull.downloader.ui import GlobusDownloadUI, HttpsDownloadUI
 
 
 def partition_by_transfer_method(files: Sequence[File]) -> tuple[list[File], dict[str, list[File]]]:
@@ -65,22 +65,23 @@ def add_https_tasks(
     ui: 'HttpsDownloadUI',
 ) -> None:
     """
-    Prepare url-based downloads and add appropriate callbacks
+    Prepare url-based downloads and add appropriate callbacks.
     """
     for task in make_https_tasks(files, app):
+        task.on_start(ui.on_start)
+        task.on_heartbeat(ui.on_heartbeat)
         orch.add_local_task(task)
-    orch.on_task_start(ui.on_start)
-    orch.on_heartbeat(ui.on_heartbeat)
 
 
 def make_globus_tasks(
     globus_files: dict[str, list[File]],
     app: 'Esgpull',
     transfer_client: 'TransferClient',
+    ui: 'GlobusDownloadUI',
 ) -> list[GlobusTransferTask]:
     """
-    Create one GlobusTransferTask per source collection, with a task-level start callback
-    that creates the GlobusTransfer record in the database.
+    Create one GlobusTransferTask per source collection, with task-level start/heartbeat
+    callbacks: one that creates the GlobusTransfer database record, one that drives the UI.
 
     Result tracking must be handled separately at the orchestrator level.
     """
@@ -98,6 +99,8 @@ def make_globus_tasks(
             poll_time_max=cfg.poll_globus_time_max,
         )
         task.on_start(_make_globus_on_start(app))
+        task.on_start(ui.on_start)
+        task.on_heartbeat(ui.on_heartbeat)
         tasks.append(task)
     return tasks
 

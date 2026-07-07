@@ -20,10 +20,10 @@ from esgpull.downloader.factory import add_https_tasks
 from esgpull.downloader.fs import Filesystem
 from esgpull.downloader.orchestrator import Orchestrator
 from esgpull.downloader.ui import HttpsDownloadUI
-from esgpull.esgpull import (
-    _is_disk_full,
-    _make_on_task_start,
-    _process_task_result,
+from esgpull.downloader.callbacks import (
+    is_disk_full as _is_disk_full,
+    make_on_task_start as _make_on_task_start,
+    process_task_result as _process_task_result,
 )
 from esgpull.exceptions import InsufficientDiskSpace
 from esgpull.models import File, FileStatus
@@ -168,7 +168,7 @@ class TestDrainCancels:
             orch.add_local_task(FakeCancelTask("t1", [f1]))
             orch.add_local_task(FakeCancelTask("t2", [f2]))
             # Never call iter_results(): tasks remain queued, unstarted.
-            return await _drain_cancels(db, orch, use_db=True)
+            return await orch.collect_cancels()
 
         errors = asyncio.run(run())
         assert errors == []
