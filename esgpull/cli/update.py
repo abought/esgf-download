@@ -15,7 +15,7 @@ from esgpull.cli.utils import (
 )
 from esgpull.context import HintsDict, ResultSearch
 from esgpull.exceptions import UnsetOptionsError
-from esgpull.models import Dataset, File, FileStatus, Query, sql
+from esgpull.models import Dataset, File, FileStatus, GlobusTransferStatus, Query, sql
 from esgpull.tui import Verbosity
 from esgpull.utils import format_size
 
@@ -250,7 +250,15 @@ def update(
                         files,
                         description=f"{qf.query.rich_name}",
                     ):
-                        if file.status != FileStatus.Done:
+                        transfer = file.globus_transfer
+                        has_active_transfer = (
+                            esg.config.download.prefer_globus
+                            and transfer is not None
+                            and transfer.status in GlobusTransferStatus.running()
+                        )
+                        # A query update automatically re-queues files that failed to download before,
+                        #   unless they are part of an ongoing async globus transfer
+                        if file.status != FileStatus.Done and not has_active_transfer:
                             file.status = FileStatus.Queued
                         if has_legacy and legacy in file.queries:
                             _ = esg.db.unlink(query=legacy, file=file)

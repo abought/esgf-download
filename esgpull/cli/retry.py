@@ -27,10 +27,8 @@ def retry(
         assert FileStatus.Done not in status
         assert FileStatus.Queued not in status
         files = list(esg.db.scalars(sql.file.with_status(*status)))
-
-        # Rare edge case: If globus is enabled, then disabled, any files left pending will be re-queued.
-        # In practice, if changing download method, we recommend using a new profile so all files are downloaded
-        #   consistently according to the changed rules.
+        # Rare edge case: If globus is enabled, and then disabled, any transfers in progress will be re-queued for
+        #   https download
         stale_files: list[File] = []
         if not esg.config.download.prefer_globus:
             explicit_shas = {file.sha for file in files}
