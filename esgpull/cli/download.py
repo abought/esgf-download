@@ -34,7 +34,7 @@ def download(
     esg = init_esgpull(verbosity, record=record)
     if disable_ssl:
         esg.config.download.disable_ssl = True
-    with esg.ui.logging("download", onraise=Abort):
+    with esg.ui.logging("download", onraise=Abort), esg.lock():
         if not valid_name_tag(esg.graph, esg.ui, query_id, tag):
             esg.ui.raise_maybe_record(Exit(1))
         if query_id is None and tag is None:

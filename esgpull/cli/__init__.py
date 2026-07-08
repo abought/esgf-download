@@ -17,6 +17,7 @@ from esgpull.cli.self import self
 from esgpull.cli.show import show
 from esgpull.cli.status import status
 from esgpull.cli.track import track, untrack
+from esgpull.cli.unlock import unlock
 from esgpull.cli.update import update
 from esgpull.tui import UI
 
@@ -49,6 +50,7 @@ SUBCOMMANDS: list[click.Command] = [
     untrack,
     status,
     # # stats,
+    unlock,
     update,
     index_nodes,
 ]

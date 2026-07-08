@@ -53,7 +53,7 @@ def update(
     Fetch files, link files <-> queries, send files to download queue
     """
     esg = init_esgpull(verbosity, record=record)
-    with esg.ui.logging("update", onraise=Abort):
+    with esg.ui.logging("update", onraise=Abort), esg.lock():
         # Select which queries to update + setup
         if query_id is None and tag is None:
             esg.graph.load_db()

@@ -23,7 +23,7 @@ def retry(
     if not status:
         status = FileStatus.retryable()
     esg = init_esgpull(verbosity)
-    with esg.ui.logging("retry", onraise=Abort):
+    with esg.ui.logging("retry", onraise=Abort), esg.lock():
         assert FileStatus.Done not in status
         assert FileStatus.Queued not in status
         files = list(esg.db.scalars(sql.file.with_status(*status)))

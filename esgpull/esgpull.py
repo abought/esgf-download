@@ -52,6 +52,7 @@ from esgpull.downloader.fs import Filesystem
 from esgpull.globus.transfer import get_transfer_client
 from esgpull.graph import Graph
 from esgpull.install_config import InstallConfig
+from esgpull.lock import ProcessLock
 from esgpull.models import (
     Facet,
     File,
@@ -152,6 +153,15 @@ class Esgpull:
             self.plugin_manager.enabled = True
             self.config.paths.plugins.mkdir(exist_ok=True, parents=True)
             self.plugin_manager.discover_plugins(self.config.paths.plugins)
+
+    def lock(self) -> ProcessLock:
+        """
+        Guards against concurrent `download`/`update`/`retry` invocations (e.g. overlapping cron runs)
+
+        The lockfile is stored in the current active profile directory, so this is typically called
+            within CLI commands after the `esgpull` object is initialized.
+        """
+        return ProcessLock(self.path)
 
     def fetch_index_nodes(self) -> list[str]:
         """

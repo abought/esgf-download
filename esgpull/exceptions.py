@@ -185,3 +185,13 @@ class GlobusLoginError(GlobusAuthError):
 
 class GlobusPermissionError(GlobusAuthError):
     msg = "Globus permission error (client: {}): the logged-in identity is not authorized to access the requested collection or path. Verify the correct identity is logged in and that the destination collection grants write access."
+
+
+class LockedError(EsgpullException):
+    msg = (
+        "Another instance appears to be running and may conflict with download operations"
+        " (host={host}, pid={pid}, command={command!r},"
+        " started {created_at} UTC, {age} ago).{stale_hint}\n"
+        "If you are sure no other instance is running,"
+        " use `esgpull unlock`."
+    )
