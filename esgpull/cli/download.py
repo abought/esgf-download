@@ -100,16 +100,6 @@ def download(
             )
         if errors:
             logger.error(f"{len(errors)} files could not be downloaded.")
-            for err in errors:
-                source = (
-                    f"globus:{err.data.globus_storage.origin_id}"
-                    if err.data.globus_storage is not None
-                    else err.data.data_node
-                )
-                logger.error(
-                    f"  {err.data.filename} [{source}]"
-                    f" [{err.data.status.name}]: {err.err}"
-                )
             exit_code = 1 if files else 2
             esg.ui.raise_maybe_record(Exit(exit_code))
         esg.ui.raise_maybe_record(Exit(0))

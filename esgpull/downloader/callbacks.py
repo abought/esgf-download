@@ -96,6 +96,25 @@ def make_file_state_on_result(
     return on_result
 
 
+def log_download_errors(event: TaskResultEvent) -> None:
+    """
+    Log each per-file download error as it happens, rather than only at an
+    end-of-run summary that an interrupted process may never reach.
+    """
+    for fr in event.files:
+        if fr.status != FileStatus.Error:
+            continue
+        source = (
+            f"globus:{fr.file.globus_storage.origin_id}"
+            if fr.file.globus_storage is not None
+            else fr.file.data_node
+        )
+        logger.error(
+            f"  {fr.file.filename} [{source}]"
+            f" [{fr.status.name}]: {fr.msg or event.msg}"
+        )
+
+
 def make_globus_transfer_on_result(db: Database) -> ResultCallback:
     """
     Track state of an async Globus Transfer task, separate from the files within

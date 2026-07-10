@@ -34,6 +34,7 @@ from esgpull.downloader.base import TaskResultEvent
 from esgpull.downloader.callbacks import (
     check_globus_auth_error,
     is_disk_full,
+    log_download_errors,
     make_file_state_on_result,
     make_globus_transfer_on_result,
     make_on_task_start,
@@ -624,6 +625,7 @@ class Esgpull:
         orch.on_task_start(make_on_task_start(self.db, use_db))
         orch.on_result(make_file_state_on_result(self.db, use_db, files, errors))
         orch.on_result(make_globus_transfer_on_result(self.db))
+        orch.on_result(log_download_errors)
         orch.on_result(ui.on_result)
 
         gen = orch.iter_results()
@@ -767,6 +769,7 @@ class Esgpull:
         orch.on_task_start(make_on_task_start(self.db, use_db))
         orch.on_result(make_file_state_on_result(self.db, use_db, files, errors))
         orch.on_result(make_globus_transfer_on_result(self.db))
+        orch.on_result(log_download_errors)
 
         def _route_result(event: TaskResultEvent) -> None:
             if 'globus_task_id' in event.extra and globus_ui is not None:
